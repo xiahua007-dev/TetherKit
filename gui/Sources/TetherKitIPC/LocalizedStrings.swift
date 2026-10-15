@@ -22,6 +22,17 @@ public enum L10nKey: String, CaseIterable, Sendable {
 
     // MARK: - 通用
 
+    case deviceSettings
+    case deviceSettingsScope
+    case todayUsage
+    case usageHistory
+    case usageScope
+    case usageUntracked
+    case usageUnavailable
+    case usageDownload
+    case usageUpload
+    case usageTotal
+    case usageSaveFailed
     case ok
     case cancel
     case copy
@@ -183,6 +194,17 @@ public enum L10nKey: String, CaseIterable, Sendable {
 
     case usbDeviceSectionTitle
     case cannotRescanWhileRunning
+    case switchToSelectedDevice
+    case switchDeviceHelp
+    case switchDeviceMissing
+    case currentUSBDevice
+    case refreshingUSBDevices
+    case networkTestsPassed
+    case networkTestsIssues
+    case helperLocalMetadataMissing
+    case helperExitedUnexpectedly
+    case helperOnDemand
+    case networkTestResults
     case rescanUSBDevices
     case noDeviceDetected
     case deviceChecklistCable
@@ -222,6 +244,8 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case menuBarNoDevice
     case menuBarReady
     case openMainWindow
+    case openDetailsWindow
+    case detailsWindowTitle
     case quit
     case quitTooltip
 
@@ -244,6 +268,38 @@ public enum L10nKey: String, CaseIterable, Sendable {
     case primaryDefaultRoute
     case notEffective
     case noAddressYet
+
+    // MARK: - 网络测试（NetworkTester.swift / NetworkCard.swift）
+
+    case trustRecoveryTitle
+    case appTrustRequired
+    case connectionTimedOut
+    case addressConfigurationFailed
+    case connectingPhone
+    case gettingAddress
+    case networkReady
+    case retryAddress
+    case advancedNetwork
+    case nextConnectionConfiguration
+    case savedStaticConfiguration
+    case networkTestSectionTitle
+    case networkTestButton
+    case networkTestRunning
+    case networkTestTooltip
+    case networkTestExplanation
+    case networkTestNotReady
+    case networkTestGateway
+    case networkTestDNS
+    case networkTestPublicHTTPS
+    case networkTestBaidu
+    case networkTestBilibili
+    case networkTestTencent
+    case networkTestDouyin
+    case networkTestHTTPResult
+    case networkTestPingResult
+    case networkTestDNSResult
+    case networkTestFailed
+    case networkTestDNSFailed
 
     // MARK: - 状态卡（StatusHeroCard.swift）
 
@@ -288,6 +344,17 @@ extension L10nKey {
 
         // MARK: 通用
 
+        case .deviceSettingsScope: return ("用于下一次连接；连接期间不可修改。通常保持默认值即可。", "Applies to the next connection; unavailable while connected. Defaults usually work best.")
+        case .deviceSettings: return ("设备高级设置", "Advanced device settings")
+        case .todayUsage: return ("今日 %@", "Today %@")
+        case .usageHistory: return ("每日流量", "Daily usage")
+        case .usageScope: return ("仅统计此 Mac 经 TetherKit 传输的流量，按本机日期记账；与运营商计费可能不同。", "Traffic through TetherKit on this Mac, grouped by local date; carrier billing may differ.")
+        case .usageUntracked: return ("无法累计用量", "Usage unavailable")
+        case .usageUnavailable: return ("设备未提供序列号，无法可靠累计每日用量。", "This device has no serial number; daily usage cannot be reliably attributed.")
+        case .usageDownload: return ("下载", "Downloaded")
+        case .usageUpload: return ("上传", "Uploaded")
+        case .usageTotal: return ("合计", "Total")
+        case .usageSaveFailed: return ("保存流量统计失败：%@", "Unable to save traffic usage: %@")
         case .ok: return ("好", "OK")
         case .cancel: return ("取消", "Cancel")
         case .copy: return ("复制", "Copy")
@@ -565,6 +632,17 @@ extension L10nKey {
         case .usbDeviceSectionTitle: return ("USB 设备", "USB device")
         case .cannotRescanWhileRunning:
             return ("运行中无法刷新设备列表", "The device list cannot be refreshed while running")
+        case .switchToSelectedDevice: return ("切换到此设备", "Switch to this device")
+        case .switchDeviceHelp: return ("断开当前设备，连接所选设备并自动应用网络配置。", "Disconnect the current device, connect to the selected device, and apply network settings automatically.")
+        case .switchDeviceMissing: return ("所选设备已离线，当前连接未断开。请刷新后重新选择。", "The selected device is no longer available. The current connection was kept. Refresh and select again.")
+        case .currentUSBDevice: return ("当前连接", "Connected")
+        case .refreshingUSBDevices: return ("刷新中…", "Refreshing…")
+        case .networkTestsPassed: return ("全部通过", "All passed")
+        case .networkTestsIssues: return ("%ld 项异常", "%ld failed")
+        case .helperLocalMetadataMissing: return ("特权组件未安装或需要更新本地状态信息。", "The helper is not installed or its local metadata needs updating.")
+        case .helperExitedUnexpectedly: return ("特权组件意外退出，连接已结束。", "The helper exited unexpectedly. The connection has ended.")
+        case .helperOnDemand: return ("按需启动", "Starts on demand")
+        case .networkTestResults: return ("测试结果", "Test results")
         case .rescanUSBDevices: return ("重新扫描 USB 设备", "Rescan USB devices")
         case .noDeviceDetected: return ("没有检测到设备", "No device detected")
         case .deviceChecklistCable:
@@ -635,6 +713,8 @@ extension L10nKey {
             return ("已就绪：%@。打开主窗口即可连接。",
                     "Ready: %@. Open the main window to connect.")
         case .openMainWindow: return ("打开主窗口", "Open the main window")
+        case .openDetailsWindow: return ("打开运行详情", "Open runtime details")
+        case .detailsWindowTitle: return ("运行详情", "Runtime details")
         case .quit: return ("退出", "Quit")
         case .quitTooltip:
             return ("退出只是关闭界面，已建立的连接会继续运行。",
@@ -683,6 +763,44 @@ extension L10nKey {
         case .noAddressYet:
             return ("%@ 目前没有 IP 地址。选择上网方式后点「应用」。",
                     "%@ has no IP address yet. Pick a configuration and press Apply.")
+
+        // MARK: 网络测试
+
+        case .trustRecoveryTitle: return ("特权组件需要恢复授权", "Restore helper authorization")
+        case .appTrustRequired: return ("此 App 尚未获信任或构建已变更，请授权更新特权组件。", "This app is not trusted or its build has changed. Authorize an update of the privileged helper.")
+        case .connectionTimedOut: return ("等待手机连接超时", "Timed out waiting for the phone")
+        case .addressConfigurationFailed: return ("地址配置失败，未读到有效 IP", "Address configuration failed: no valid IP address")
+        case .connectingPhone: return ("正在连接手机", "Connecting to phone")
+        case .gettingAddress: return ("正在获取 IP", "Obtaining IP address")
+        case .networkReady: return ("网络已就绪", "Network ready")
+        case .retryAddress: return ("重试获取地址", "Retry address configuration")
+        case .advancedNetwork: return ("高级网络设置", "Advanced network settings")
+        case .nextConnectionConfiguration: return ("未连接时的修改用于下一次连接；成功后保存。", "Offline changes apply to the next connection and are saved after success.")
+        case .savedStaticConfiguration: return ("使用之前的静态地址配置；更换网络时可切回 DHCP。", "Using the previous static configuration. Switch to DHCP when changing networks.")
+        case .networkTestSectionTitle: return ("网络连通性", "Network connectivity")
+        case .networkTestButton: return ("测试网络", "Test network")
+        case .networkTestRunning: return ("测试中…", "Testing…")
+        case .networkTestTooltip:
+            return ("只在点击时测试，并强制走当前虚拟网卡",
+                    "Run a one-time test through the current virtual interface")
+        case .networkTestExplanation:
+            return ("会测试手机网关、手机 DNS、公共 HTTPS 和几个常用网站；只要收到 HTTP 响应，就说明链路已经连通。",
+                    "Tests the phone gateway, the phone's DNS, public HTTPS, and several common sites; any HTTP response means the path is reachable.")
+        case .networkTestNotReady:
+            return ("网卡还没有拿到地址，请先连接并配置网络。",
+                    "The interface has no address yet. Connect and configure the network first.")
+        case .networkTestGateway: return ("手机网关", "Phone gateway")
+        case .networkTestDNS: return ("手机 DNS", "Phone DNS")
+        case .networkTestPublicHTTPS: return ("公共 HTTPS（Cloudflare）", "Public HTTPS (Cloudflare)")
+        case .networkTestBaidu: return ("百度", "Baidu")
+        case .networkTestBilibili: return ("哔哩哔哩", "Bilibili")
+        case .networkTestTencent: return ("腾讯", "Tencent")
+        case .networkTestDouyin: return ("抖音", "Douyin")
+        case .networkTestHTTPResult: return ("HTTP %1$ld · %.0f ms", "HTTP %1$ld · %.0f ms")
+        case .networkTestPingResult: return ("%.0f ms", "%.0f ms")
+        case .networkTestDNSResult: return ("已解析", "Resolved")
+        case .networkTestFailed: return ("失败", "Failed")
+        case .networkTestDNSFailed: return ("DNS 失败", "DNS failed")
 
         // MARK: 状态卡
 

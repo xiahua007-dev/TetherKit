@@ -3,19 +3,12 @@ import TetherKitIPC
 
 /// 主界面。
 ///
-/// 布局目标是**默认窗口尺寸下一屏放完，不滚动**：常驻仪表盘要靠滚动才能看全，
-/// 等于把「瞟一眼」变成了「翻一遍」。为此分成两栏 ——
-///
-///   顶部横幅：现在什么状态（全宽，唯一的操作重心）
-///   左栏「控制」：用哪台设备 → 怎么上网（连接前用，连上后基本不碰）
-///   右栏「观测」：跑得怎么样 → 出了什么事（连上后 90% 的时间只看这边）
-///
-/// 日志不再折叠：它常驻右栏底部，把剩余高度全部吃掉 —— 窗口越大看到的越多，
-/// 而不是留一片空白还要用户手动展开。
+/// 主窗口只放连接控制：现在什么状态、用哪台设备、怎么配置网络。
+/// 吞吐和日志属于按需查看的运行详情，放在独立窗口里，避免主页面常驻 Charts
+/// 和长列表。
 ///
 /// 外层仍留一个 ScrollView 兜底：极端组合（比如把窗口压到最小 + 静态表单 +
-/// 系统参数警告同时出现）超出可视区时宁可滚动也不能截断。`basedOnSize` 保证
-/// 内容放得下时它完全不参与 —— 不出滚动条也不回弹。
+/// 系统参数警告同时出现）超出可视区时宁可滚动也不能截断。
 ///
 /// 刻意不用 NavigationSplitView 的侧边栏：这个 App 只有一件事可做，
 /// 侧边栏只会制造一个空荡荡的导航层级。
@@ -127,29 +120,13 @@ struct ContentView: View {
             StatusHeroCard(model: model)
             EnvironmentWarningCard(environment: model.environment)
 
-            HStack(alignment: .top, spacing: Design.Spacing.gutter) {
-                // 管理行放在卡片组之外、间距归零：它跟着 gutter 排的话要
-                // 白付两个 12pt 的间距 —— 整页的高度预算是「最小窗口
-                // （内容高 700）也放得下」，为一行 caption 花 41pt 曾把
-                // 预算顶破 14pt，主页面因此能滚一点（实测踩过）。
-                // Spacer 把它压到左栏底部的既有空隙里，不新增整页高度。
-                VStack(spacing: 0) {
-                    VStack(spacing: Design.Spacing.gutter) {
-                        DeviceCard(model: model)
-                        NetworkCard(model: model)
-                    }
-                    Spacer(minLength: 0)
-                    helperManagementFooter
-                        .padding(.top, Design.Spacing.tight)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-
-                VStack(spacing: Design.Spacing.gutter) {
-                    ThroughputCard(model: model)
-                    LogCard(model: model)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            VStack(spacing: Design.Spacing.gutter) {
+                DeviceCard(model: model)
+                NetworkCard(model: model)
+                helperManagementFooter
+                    .padding(.top, Design.Spacing.tight)
             }
+            .frame(maxWidth: .infinity, alignment: .top)
         }
     }
 
@@ -182,7 +159,8 @@ struct ContentView: View {
                     .disabled(model.isBusy)
                     .help(L(.helperVersionMismatchTooltip, mismatch.installed, mismatch.expected))
                 } else {
-                    Text(L(.helperComponentVersion, version))
+                    Text(L(.helperComponentVersion, version)
+                         + (model.helperIsRunning ? "" : " · " + L(.helperOnDemand)))
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .textSelection(.enabled)
@@ -261,16 +239,16 @@ private struct HelperMissingCard: View {
     let reason: String
 
     var body: some View {
-        Card(title: L(.needInstallTitle), systemImage: "lock.shield") {
+        Card(title: L(model.helperNeedsTrustRecovery ? .trustRecoveryTitle : .needInstallTitle), systemImage: "lock.shield") {
             VStack(alignment: .leading, spacing: Design.Spacing.medium) {
-                Text(L(.needInstallBody))
+                Text(L(model.helperNeedsTrustRecovery ? .appTrustRequired : .needInstallBody))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HelperInstallSection(
                     model: model,
-                    buttonTitle: L(.installHelperButton),
+                    buttonTitle: L(model.helperNeedsTrustRecovery ? .updateHelperButton : .installHelperButton),
                     detail: L(.installHelperDetail))
 
                 DisclosureGroup(L(.showConnectFailureDetail)) {

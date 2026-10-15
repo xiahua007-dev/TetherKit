@@ -94,10 +94,7 @@ enum UpdateCheckResult: Equatable {
 
 /// 界面的全部状态与动作。
 ///
-/// ★ 为什么所有事都经过 helper，而不是 App 自己调库 ★
-///   App 以普通用户身份运行，建 feth 和开 BPF 都要 root，所以会话只能在 helper
-///   里跑。设备枚举与环境预检虽然不需要 root，但也统一走 helper —— 会话跑起来后
-///   设备已被 helper 独占，App 再去读只会得到不一致的结果。
+/// 会话只在特权 helper 中运行；空闲探测与设备枚举留在 App，避免唤醒 helper。
 @Observable
 @MainActor
 final class AppModel {
@@ -105,11 +102,14 @@ final class AppModel {
 
     private(set) var helperAvailability: HelperAvailability = .unknown
     /// 装着的组件与 App 版本对不上时的两个版本号；一致（或还没探到）为 nil。
+    private(set) var helperNeedsTrustRecovery = false
+    private(set) var helperIsRunning = false
     private(set) var helperVersionMismatch: HelperVersionMismatch?
     private(set) var environment: EnvironmentReport?
     private(set) var devices: [DeviceDescriptor] = []
     private(set) var status: SessionStatus = .idle
     private(set) var networkState: NetworkState = .empty
+    private(set) var networkTestState: NetworkTestState = .idle
     private(set) var throughput: ThroughputSample = .zero
     private(set) var throughputHistory: [ThroughputSample] = []
     private(set) var logs: [LogEntry] = []
@@ -122,6 +122,38 @@ final class AppModel {
     var adoptDeviceMAC: Bool = true
     /// 网络配置表单。
     var networkConfiguration: NetworkConfiguration = .dhcp
+    private(set) var savedNetworkConfiguration: NetworkConfiguration = .dhcp
+    private var appliedNetworkConfiguration: NetworkConfiguration?
+
+    var hasNetworkChanges: Bool { networkConfiguration != appliedNetworkConfiguration }
+
+    var connectionLabel: String {
+        if status.networkPhase == .failed, status.runState != .failed {
+            return L(status.runState == .stopped ? .connectionTimedOut : .addressConfigurationFailed)
+        }
+        if status.runState == .starting { return L(.connectingPhone) }
+        if status.runState == .running {
+            switch status.networkPhase {
+            case .waitingForInterface: return L(.connectingPhone)
+            case .configuring: return L(.gettingAddress)
+            case .ready where networkState.hasAddress:
+                if !status.linkUp { return L(.linkDown) }
+                if status.paused { return L(.transferPaused) }
+                return L(.networkReady)
+            case .failed: return L(.addressConfigurationFailed)
+            default: return L(.notConfigured)
+            }
+        }
+        return Design.statusLabel(for: status)
+    }
+
+    func rememberNetworkConfiguration(_ configuration: NetworkConfiguration) {
+        guard configuration.mode != .none,
+              NetworkValidator.validationMessage(for: configuration) == nil else { return }
+        savedNetworkConfiguration = configuration
+        networkDefaults.set(try? JSONEncoder().encode(configuration),
+                                  forKey: "TetherKitSuccessfulNetworkConfiguration")
+    }
 
     /// 界面语言偏好。改它会**同时**做三件事：切 Swift 侧的文案表、把语言推给
     /// libtetherkit（否则日志卡里会混进另一种语言）、再推给 helper（它以 root
@@ -141,6 +173,7 @@ final class AppModel {
 
     /// 正在等待某个特权操作完成 —— 界面据此禁用按钮并显示进度。
     private(set) var isBusy: Bool = false
+    private(set) var isRefreshingDevices = false
     /// 需要弹给用户看的错误。
     var alertMessage: String?
 
@@ -153,7 +186,16 @@ final class AppModel {
 
     // MARK: - 内部
 
-    private let client = HelperClient()
+    private let client: any HelperConnection
+    private let networkDefaults: UserDefaults
+
+    init(networkDefaults: UserDefaults = .standard, client: any HelperConnection = HelperClient()) {
+        self.client = client
+        self.networkDefaults = networkDefaults
+        restoreNetworkConfiguration()
+    }
+
+    private var hasStarted = false
     private var pollingTask: Task<Void, Never>?
     /// 上一次的状态快照，用来做差算速率。
     private var previousStatus: SessionStatus?
@@ -161,8 +203,14 @@ final class AppModel {
     /// 上次枚举设备的时刻。用单调时钟，避免系统时间被调整时算出负的间隔。
     private var lastDeviceRefresh: ContinuousClock.Instant?
 
-    /// 主窗口当前是否可见。只影响轮询节奏；程序坞图标策略在视图层处理。
-    private var isWindowVisible = true
+    /// 主窗口关闭时停止状态轮询；网络会话由 helper 独立持有。
+    private var isMainWindowVisible = false
+    /// 详情窗口关闭时停止日志与吞吐数据轮询。
+    private var isDetailsWindowVisible = false
+
+    private var isPollingNeeded: Bool {
+        isMainWindowVisible || isDetailsWindowVisible
+    }
 
     /// 最近一次「明确要求显示主窗口」的时刻。初始值 = 现在，因为 App 启动本身
     /// 就是一次合法的窗口展示。
@@ -179,7 +227,6 @@ final class AppModel {
     /// 不写这一句的话框里只有「TetherKit 想要进行更改」，用户无从判断该不该批准。
     /// 用计算属性而不是 `static let`：`static let` 只在类型第一次被用到时求值
     /// 一次，用户之后切换语言就再也不会更新了。
-    private static var authorizationPrompt: String { L(.authPromptSession) }
 
     /// 安装特权组件时授权框里的说明。单独一句 —— 这次批准的是「往系统目录里
     /// 装东西」，和上面的日常操作不是一回事，文案必须说实话。
@@ -190,12 +237,8 @@ final class AppModel {
 
     /// 轮询周期。
     ///
-    /// 500 ms 是「看起来实时」与「别把 XPC 往返变成负担」的平衡点：更快对人眼
-    /// 已无区别，更慢会让速率曲线看起来一顿一顿的。
-    private static let pollInterval: Duration = .milliseconds(500)
-
-    /// 纯后台待机（窗口关着、会话没跑）时的轮询间隔。
-    private static let backgroundPollInterval: Duration = .seconds(2)
+    /// 主窗口可见时每秒刷新一次，减少 XPC 往返与图表重绘。
+    private static let pollInterval: Duration = .seconds(1)
 
     /// 设备枚举的最小间隔。
     ///
@@ -203,8 +246,8 @@ final class AppModel {
     /// 响应延迟用户基本感觉不到，而开销降到了原来的四分之一。
     private static let deviceRefreshInterval: Duration = .seconds(2)
 
-    /// 吞吐曲线保留的采样点数。120 点 × 500 ms = 最近 60 秒。
-    private static let historyCapacity = 120
+    /// 吞吐曲线保留的采样点数。60 点 × 1 秒 = 最近约 60 秒。
+    private static let historyCapacity = 60
 
     /// 日志面板保留的行数。
     ///
@@ -241,18 +284,36 @@ final class AppModel {
     private static let languageDefaultsKey = "TetherKitLanguagePreference"
 
     func start() {
-        guard pollingTask == nil else { return }
+        guard !hasStarted else { return }
+        hasStarted = true
         restoreLanguagePreference()
+        restoreKnownUpdate()
+        Task { await checkForUpdatesQuietly() }
+    }
+
+    private func restoreNetworkConfiguration() {
+        if let data = networkDefaults.data(forKey: "TetherKitSuccessfulNetworkConfiguration"),
+           let configuration = try? JSONDecoder().decode(NetworkConfiguration.self, from: data),
+           configuration.mode != .none,
+           NetworkValidator.validationMessage(for: configuration) == nil {
+            networkConfiguration = configuration
+            savedNetworkConfiguration = configuration
+        }
+    }
+
+    private func startPolling() {
+        guard isPollingNeeded, pollingTask == nil else { return }
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.refresh()
-                // 间隔是动态的：会话在跑或窗口开着就保持流畅，纯后台待机时放慢。
-                try? await Task.sleep(for: self.pollDelay)
+                do {
+                    try await Task.sleep(for: Self.pollInterval)
+                } catch {
+                    return
+                }
             }
         }
-        restoreKnownUpdate()
-        Task { await checkForUpdatesQuietly() }
     }
 
     func stopPolling() {
@@ -261,17 +322,40 @@ final class AppModel {
     }
 
     /// 主窗口出现（含从菜单栏重新打开）。
-    ///
-    /// 立刻刷一次而不是等下一个周期：后台轮询可能正睡在 2 秒的长间隔里，
-    /// 用户打开窗口的第一眼不该看到陈旧数据。
     func windowDidAppear() {
-        isWindowVisible = true
-        Task { await refresh() }
+        guard !isMainWindowVisible else { return }
+        isMainWindowVisible = true
+        startPolling()
     }
 
-    /// 主窗口关闭。App 转入后台模式，轮询继续（菜单栏靠它喂数据）但会放慢。
+    /// 主窗口消失后停止主窗口状态轮询；详情窗口若仍打开，轮询继续运行。
     func windowDidDisappear() {
-        isWindowVisible = false
+        isMainWindowVisible = false
+        stopPollingIfNeeded()
+    }
+
+    /// 详情窗口出现时开始收集吞吐和日志。
+    func detailsWindowDidAppear() {
+        guard !isDetailsWindowVisible else { return }
+        isDetailsWindowVisible = true
+        previousStatus = nil
+        throughput = .zero
+        throughputHistory.removeAll()
+        startPolling()
+    }
+
+    /// 详情窗口消失后停止收集日志和吞吐；不向 helper 发停止会话的请求。
+    func detailsWindowDidDisappear() {
+        isDetailsWindowVisible = false
+        throughput = .zero
+        throughputHistory.removeAll()
+        stopPollingIfNeeded()
+    }
+
+    private func stopPollingIfNeeded() {
+        if !isPollingNeeded {
+            stopPolling()
+        }
     }
 
     /// 登记「接下来这次主窗口展示是我们主动要求的」。
@@ -291,79 +375,129 @@ final class AppModel {
         ContinuousClock.now - windowPresentationRequestedAt < .seconds(3)
     }
 
-    /// 当前该用的轮询间隔。
-    ///
-    /// 三种情况用快节奏：会话在跑（菜单栏要显示实时速率）、正在启动/停止
-    /// （用户在等结果）、窗口开着（用户在看）。只有「纯后台待机」才放慢 ——
-    /// 那时轮询唯一的产出是 helper 探活与设备扫描，没人需要它们每半秒一次。
-    private var pollDelay: Duration {
-        let sessionActive = status.runState == .running || status.runState.isTransitional
-        return sessionActive || isWindowVisible ? Self.pollInterval : Self.backgroundPollInterval
-    }
-
     // MARK: - 轮询
 
-    private func refresh() async {
+    /// 只读 root 安装元数据和本地运行记录，不发 XPC，也不拉起 helper。
+    func refreshHelperAvailability() async -> HelperObservation? {
         do {
-            let (revision, version) = HelperConstants.decodeVersion(try await client.helperVersion())
-            guard revision == HelperConstants.protocolRevision else {
-                helperAvailability = .outdated(installed: revision,
-                                               expected: HelperConstants.protocolRevision)
-                // 协议对不上时不再另报版本不一致：那张卡本来就是要用户去更新组件，
-                // 同一件事说两遍只会让人怀疑是两个问题。
+            guard let installation = try await client.installation() else {
+                helperNeedsTrustRecovery = FileManager.default.fileExists(
+                    atPath: HelperConstants.helperExecutablePath)
+                helperAvailability = .missing(reason: L(.helperLocalMetadataMissing))
                 helperVersionMismatch = nil
-                // 接口对不上就别继续发请求了 —— 参数与应答的形状都可能不一致。
-                return
+                helperIsRunning = false
+                return nil
             }
-            helperAvailability = .available(version: version)
-            helperVersionMismatch = Self.versionMismatch(installed: version)
+            guard installation.revision == HelperConstants.protocolRevision else {
+                helperAvailability = .outdated(installed: installation.revision,
+                                               expected: HelperConstants.protocolRevision)
+                helperVersionMismatch = nil
+                return nil
+            }
+            helperAvailability = .available(version: installation.version)
+            helperNeedsTrustRecovery = false
+            helperVersionMismatch = Self.versionMismatch(installed: installation.version)
+            let observation = await client.observation()
+            helperIsRunning = observation.isRunning
+            return observation
         } catch {
+            helperNeedsTrustRecovery = true
             helperAvailability = .missing(reason: error.localizedDescription)
             helperVersionMismatch = nil
-            // 连不上就别再发后续请求了 —— 每一个都会重复同样的失败，
-            // 只会把日志刷满。
+            helperIsRunning = false
+            return nil
+        }
+    }
+
+    private func refresh() async {
+        guard isPollingNeeded, !Task.isCancelled else { return }
+        guard let observation = await refreshHelperAvailability() else { return }
+        guard isPollingNeeded, !Task.isCancelled else { return }
+        if environment == nil { environment = TetherKitLibrary.checkEnvironment() }
+        let last = observation.lastStatus
+        let sessionActive = last?.runState == .starting || last?.runState == .running
+            || last?.runState == .stopping
+        if !observation.isRunning || !sessionActive {
+            guard !isBusy else { return }
+            var final = last ?? .idle
+            if !observation.isRunning, sessionActive {
+                final.runState = .failed
+                final.fatalMessage = L(.helperExitedUnexpectedly)
+            }
+            apply(status: final)
+            networkState = .empty
+            if shouldRefreshDevices() { await refreshDevices(reportErrors: false) }
             return
         }
 
-        if environment == nil {
-            environment = try? await client.environment()
-        }
-
-        if let fresh = try? await client.sessionStatus() {
+        do {
+            let fresh = try await client.sessionStatus()
+            guard isPollingNeeded, !Task.isCancelled else { return }
             apply(status: fresh)
+        } catch {
+            let latest = await client.observation()
+            if latest.isRunning {
+                helperNeedsTrustRecovery = true
+                helperAvailability = .missing(reason: error.localizedDescription)
+            }
+            return
         }
-        if let feed = try? await client.drainFeed() {
-            apply(feed: feed)
-        }
-
-        // 设备列表只在没跑起来的时候刷：运行中设备已被独占，列表也不该变。
-        //
-        // 而且**刷得比状态慢**。枚举一次要读 USB 字符串描述符，那需要
-        // libusb_open 真的把设备打开一遍 —— 按 500 ms 的状态轮询节奏做这件事，
-        // 等于每秒钟去开关用户的设备两次，既浪费又可能干扰它。插拔响应慢 2 秒
-        // 完全不影响体感。
-        if status.runState != .running, shouldRefreshDevices() {
-            if let fresh = try? await client.listDevices() {
-                devices = fresh
-                // 用户选中的设备被拔掉后，选择要跟着失效，否则「启动」会按一个
-                // 不存在的总线地址去找设备。
-                if let selected = selectedDeviceID,
-                   !devices.contains(where: { $0.id == selected }) {
-                    selectedDeviceID = nil
-                }
+        guard isPollingNeeded, !Task.isCancelled else { return }
+        if isDetailsWindowVisible {
+            if let feed = try? await client.drainFeed() {
+                guard isPollingNeeded, isDetailsWindowVisible, !Task.isCancelled else { return }
+                apply(feed: feed)
             }
         }
+        guard isPollingNeeded, !Task.isCancelled else { return }
 
+        // helper 在会话占用设备时跳过字符串读取，运行中也能安全发现新增设备。
+        if shouldRefreshDevices() {
+            await refreshDevices(reportErrors: false)
+        }
+
+        guard isPollingNeeded, !Task.isCancelled else { return }
         if !status.systemInterface.isEmpty {
-            networkState = (try? await client.queryNetwork(interface: status.systemInterface))
-                ?? .empty
+            let connectionID = status.connectionID
+            let fresh = try? await client.queryNetwork(interface: status.systemInterface)
+            guard isPollingNeeded, !Task.isCancelled, connectionID == status.connectionID else { return }
+            networkState = fresh ?? .empty
         } else {
             networkState = .empty
         }
     }
 
 
-    private func apply(status fresh: SessionStatus) {
+    var usageRecords = TrafficUsage.read()
+
+    func reloadUsage() {
+        usageRecords = TrafficUsage.read()
+        if let today = status.todayUsage { mergeUsage(today) }
+    }
+
+    private func mergeUsage(_ entry: DailyUsage) {
+        guard !usageRecords.contains(entry) else { return }
+        usageRecords.removeAll { $0.id == entry.id }
+        usageRecords.append(entry)
+    }
+
+    func apply(status fresh: SessionStatus) {
+        if let today = fresh.todayUsage { mergeUsage(today) }
+        if let saved = fresh.savedConfiguration,
+           saved.mode != .none, NetworkValidator.validationMessage(for: saved) == nil {
+            let draftUnchanged = networkConfiguration == savedNetworkConfiguration
+            if saved != savedNetworkConfiguration { rememberNetworkConfiguration(saved) }
+            if draftUnchanged { networkConfiguration = saved }
+        }
+        if fresh.connectionID != status.connectionID {
+            networkTestState = .idle
+            networkState = .empty
+            appliedNetworkConfiguration = nil
+        }
+        appliedNetworkConfiguration = fresh.appliedConfiguration
+        if let configuration = fresh.appliedConfiguration {
+            if configuration != savedNetworkConfiguration { rememberNetworkConfiguration(configuration) }
+        }
         defer {
             previousStatus = fresh
             status = fresh
@@ -376,10 +510,11 @@ final class AppModel {
             sessionStartedAt = nil
         }
 
-        guard let previous = previousStatus,
+        guard isDetailsWindowVisible,
+              let previous = previousStatus,
               fresh.runState == .running,
               fresh.monotonicNanos > previous.monotonicNanos else {
-            if fresh.runState != .running {
+            if isDetailsWindowVisible, fresh.runState != .running {
                 throughput = .zero
             }
             return
@@ -425,14 +560,20 @@ final class AppModel {
         if let selectedDeviceID {
             return devices.first { $0.id == selectedDeviceID }
         }
-        return devices.first
+        return devices.first(where: { status.runState == .running
+            && $0.summary == status.deviceDescription }) ?? devices.first
+    }
+
+    var canSwitchDevice: Bool {
+        guard status.runState == .running, let selectedDevice else { return false }
+        return selectedDevice.summary != status.deviceDescription
     }
 
     /// 过滤 + 连续去重后的日志。
     ///
     /// 折叠放在过滤**之后**：原始流里两条相同的 INFO 之间可能夹着 trace，
     /// 按原始顺序折叠会失效，而用户在某个级别下看到的相邻重复才是该合并的。
-    /// O(n) 重算，n ≤ 2000，对 500 ms 的刷新节奏无感。
+    /// O(n) 重算，n ≤ 2000，对每秒一次的刷新节奏无感。
     var filteredLogs: [CollapsedLogEntry] {
         var collapsed: [CollapsedLogEntry] = []
         for entry in logs where entry.level >= logLevelFilter {
@@ -451,8 +592,14 @@ final class AppModel {
         isBusy = true
         defer { isBusy = false }
 
+        let network = networkConfiguration
+        if let message = NetworkValidator.validationMessage(for: network) {
+            alertMessage = message
+            return
+        }
         var configuration = SessionConfiguration(mtu: requestedMTU,
-                                                 adoptDeviceMAC: adoptDeviceMAC)
+                                                 adoptDeviceMAC: adoptDeviceMAC,
+                                                 networkConfiguration: network)
         // 指定总线 + 地址而不是 VID/PID：同型号两台设备 VID/PID 完全一样，
         // 只有总线地址能区分。
         if let device = selectedDevice {
@@ -460,10 +607,16 @@ final class AppModel {
             configuration.deviceAddress = device.deviceAddress
         }
 
+        configuration.language = L10n.language
+        configuration.usageDevice = selectedDevice
         await authorized { [self] authorization in
             throughputHistory.removeAll()
             try await client.startSession(authorization: authorization,
                                           configuration: configuration)
+            var pending = SessionStatus.idle
+            pending.runState = .starting
+            pending.networkPhase = .waitingForInterface
+            apply(status: pending)
         }
     }
 
@@ -475,6 +628,9 @@ final class AppModel {
 
         await authorized { [self] authorization in
             try await client.stopSession(authorization: authorization)
+            apply(status: .idle)
+            networkState = .empty
+            networkTestState = .idle
         }
     }
 
@@ -491,12 +647,15 @@ final class AppModel {
             return
         }
 
+        let configuration = networkConfiguration
         isBusy = true
         defer { isBusy = false }
 
         await authorized { [self] authorization in
             try await client.applyNetwork(authorization: authorization, interface: interface,
-                                          configuration: networkConfiguration)
+                                          configuration: configuration)
+            appliedNetworkConfiguration = configuration
+            rememberNetworkConfiguration(configuration)
             // 立刻回读一次，让界面马上反映真实生效的地址，而不用等下一个轮询周期。
             networkState = (try? await client.queryNetwork(interface: interface)) ?? .empty
         }
@@ -521,12 +680,114 @@ final class AppModel {
         }
     }
 
-    /// 手动刷新设备列表（界面上的刷新按钮）。
-    ///
-    /// 手动触发时不受节流限制 —— 用户点了按钮就是想立刻看到结果。
-    func refreshDevices() async {
+    /// 按需测试当前虚拟网卡的实际连通性。
+    func testNetwork() async {
+        guard !networkTestState.isRunning else { return }
+        let interface = status.systemInterface
+        guard status.runState == .running, !interface.isEmpty, networkState.hasAddress else {
+            alertMessage = L(.networkTestNotReady)
+            return
+        }
+
+        let connectionID = status.connectionID
+        networkTestState = .running
+        let results = await NetworkTester.run(
+            interfaceName: interface,
+            sourceAddress: networkState.address,
+            router: networkState.router)
+        let observation = await client.observation()
+        let current = observation.isRunning ? try? await client.sessionStatus() : nil
+        guard connectionID == status.connectionID,
+              current?.connectionID == connectionID, current?.runState == .running else {
+            networkTestState = .idle
+            return
+        }
+        networkTestState = .finished(results)
+    }
+
+    /// 刷新只枚举设备，不停止或重建现有会话；失败时保留原列表。
+    func refreshDevices(reportErrors: Bool = true) async {
+        guard !isRefreshingDevices else { return }
+        isRefreshingDevices = true
+        let started = ContinuousClock.now
         lastDeviceRefresh = .now
-        devices = (try? await client.listDevices()) ?? []
+        defer { isRefreshingDevices = false }
+        do {
+            let fresh = try await client.listDevices()
+            if !reportErrors {
+                guard isPollingNeeded, !Task.isCancelled else { return }
+            }
+            devices = fresh.map { device in
+                guard let known = devices.first(where: {
+                    $0.id == device.id && $0.vendorID == device.vendorID
+                        && $0.productID == device.productID
+                }) else { return device }
+                var reconciled = device
+                if reconciled.manufacturer.isEmpty { reconciled.manufacturer = known.manufacturer }
+                if reconciled.product.isEmpty { reconciled.product = known.product }
+                if reconciled.serial.isEmpty { reconciled.serial = known.serial }
+                return reconciled
+            }
+            if let selectedDeviceID, !fresh.contains(where: { $0.id == selectedDeviceID }) {
+                self.selectedDeviceID = nil
+            }
+        } catch {
+            if reportErrors { alertMessage = error.localizedDescription }
+        }
+        // 手动扫描很快时仍保留短暂反馈；自动发现不增加等待。
+        if reportErrors {
+            let remaining = Duration.milliseconds(600) - (ContinuousClock.now - started)
+            if remaining > .zero { try? await Task.sleep(for: remaining) }
+        }
+    }
+
+    /// 用户明确点击切换后，按顺序停旧会话、启动目标设备；全程使用固定快照。
+    func switchDevice() async {
+        guard !isBusy, canSwitchDevice, let device = selectedDevice else { return }
+        let network = networkConfiguration
+        if let message = NetworkValidator.validationMessage(for: network) {
+            alertMessage = message
+            return
+        }
+        var configuration = SessionConfiguration(
+            vendorID: device.vendorID, productID: device.productID,
+            busNumber: device.busNumber, deviceAddress: device.deviceAddress,
+            mtu: requestedMTU, adoptDeviceMAC: adoptDeviceMAC, networkConfiguration: network)
+        configuration.language = L10n.language
+        configuration.usageDevice = device
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            // 在中断旧连接之前确认目标仍然存在。
+            let fresh = try await client.listDevices()
+            guard fresh.contains(where: { $0.id == device.id
+                && $0.vendorID == device.vendorID && $0.productID == device.productID }) else {
+                alertMessage = L(.switchDeviceMissing)
+                return
+            }
+            try await client.switchSession(authorization: Data(), configuration: configuration)
+            networkState = .empty
+            networkTestState = .idle
+            throughputHistory.removeAll()
+            selectedDeviceID = device.id
+            var pending = SessionStatus.idle
+            pending.runState = .starting
+            pending.networkPhase = .waitingForInterface
+            apply(status: pending)
+        } catch {
+            let observation = await client.observation()
+            if observation.isRunning {
+                if let fresh = try? await client.sessionStatus() { apply(status: fresh) }
+            } else if let final = observation.lastStatus {
+                apply(status: final)
+            } else {
+                var failed = SessionStatus.idle
+                failed.runState = .failed
+                failed.fatalMessage = error.localizedDescription
+                apply(status: failed)
+            }
+            alertMessage = error.localizedDescription
+        }
     }
 
     /// 距上次枚举是否已经够久。顺带记下这一次的时刻。
@@ -553,7 +814,7 @@ final class AppModel {
     ///
     /// 敢用 `static let` 缓存是因为它是编译期烧进 dylib 的常量，进程活着的时候
     /// 不会变 —— 与上面几个必须跟着语言走的提示语不同。顺手把版本号提取也
-    /// 做掉：这个判断挂在 500 ms 一次的轮询上，没必要每次都重跑一遍正则。
+    /// 做掉：这个判断挂在每秒一次的轮询上，没必要每次都重跑一遍正则。
     private static let bundledVersion =
         HelperConstants.semanticVersion(of: TetherKitLibrary.versionInfo.version)
 
@@ -715,56 +976,10 @@ final class AppModel {
         return kept.isEmpty ? L(.scriptNoOutput) : kept
     }
 
-    /// 带着授权凭据执行一次特权操作，必要时才弹系统授权框。
-    ///
-    /// ★ 为什么缓存令牌 ★
-    ///   `system.privilege.admin` 的实测参数是 `shared = false`、`timeout = 300`。
-    ///   `shared = false` 意味着凭据**不跨 AuthorizationRef 共享** —— 每次操作
-    ///   新建一个 ref，就必然要用户重新认证一次，于是「连接、配网络、断开」
-    ///   会连弹三次框。而 `timeout = 300` 意味着同一个 ref 上的凭据 5 分钟内
-    ///   一直有效。
-    ///
-    ///   所以缓存令牌复用：第一次操作弹一次框，之后 5 分钟内都不用再弹。
-    ///   过期后 helper 的复核会失败并明确告知「这是授权问题」，我们据此丢弃
-    ///   缓存、重新弹一次框、把这次操作重试一遍 —— 用户看到的仍然是「操作前
-    ///   弹了一次框」，而不是一个莫名其妙的失败。
-    ///
-    /// ★ 为什么不能自己接住凭据再用 ★
-    ///   外部形式只是指向 securityd 里那份授权的一把钥匙，不是凭据本身。
-    ///   AuthorizationRef 一释放，helper 还原时就会报 -60005。所以令牌由
-    ///   `cachedAuthorization` 持有，并用 `withExtendedLifetime` 保证它活到
-    ///   XPC 往返结束之后。
-    ///
-    /// 用户取消时**不**弹错误提示 —— 取消是正常操作，再弹一个「已取消」的框
-    /// 只会烦人。
+    /// 普通操作由 helper 的 XPC 信任约束保护，不申请管理员凭据。
     private func authorized(_ body: @escaping (Data) async throws -> Void) async {
-        // 第一趟：有缓存就直接用，不打扰用户。
-        if let cached = cachedAuthorization {
-            // withExtendedLifetime 不能接 async 闭包，所以用 defer 把令牌钉到
-            // 作用域结束 —— 光靠局部 let 不够，ARC 可以在最后一次读
-            // externalForm 之后就释放它，而那时 XPC 往返还没回来。
-            defer { withExtendedLifetime(cached) {} }
-            do {
-                try await body(cached.externalForm)
-                return
-            } catch let failure as HelperClient.Failure where failure.isAuthorizationProblem {
-                // 凭据过期了。丢掉缓存，往下走「重新授权 + 重试」。
-                cachedAuthorization = nil
-            } catch {
-                alertMessage = error.localizedDescription
-                return
-            }
-        }
-
-        // 第二趟：弹框取新凭据，然后执行（或重试）。
         do {
-            let token = try AuthorizationBroker.requestAuthorization(
-                prompt: Self.authorizationPrompt)
-            defer { withExtendedLifetime(token) {} }
-            cachedAuthorization = token
-            try await body(token.externalForm)
-        } catch AuthorizationBroker.Failure.userCancelled {
-            return
+            try await body(Data())
         } catch {
             alertMessage = error.localizedDescription
         }

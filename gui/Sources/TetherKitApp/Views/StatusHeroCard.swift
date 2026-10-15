@@ -7,6 +7,7 @@ import TetherKitIPC
 /// 其余细节都往下面的卡片里放 —— 用户九成的时间只看这一块。
 struct StatusHeroCard: View {
     @Bindable var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     private var accent: Color { Design.accent(for: model.status.runState) }
 
@@ -24,14 +25,17 @@ struct StatusHeroCard: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                actionButton
+                HStack(spacing: Design.Spacing.small) {
+                    detailsButton
+                    actionButton
+                }
             }
         }
     }
 
     private var headline: some View {
         HStack(spacing: Design.Spacing.small) {
-            Text(Design.statusLabel(for: model.status))
+            Text(model.connectionLabel)
                 .font(.system(.title2, design: .rounded).weight(.semibold))
 
             if model.status.runState == .running {
@@ -46,7 +50,17 @@ struct StatusHeroCard: View {
 
     @ViewBuilder
     private var subline: some View {
-        if model.status.runState == .failed, !model.status.fatalMessage.isEmpty {
+        if model.status.runState != .failed, model.status.networkPhase == .failed {
+            VStack(alignment: .leading) {
+                Text(model.status.networkMessage).foregroundStyle(.red)
+                if model.status.runState == .running {
+                    Button(L(.retryAddress)) {
+                        Task { await model.applyNetworkConfiguration() }
+                    }
+                    .disabled(model.isBusy)
+                }
+            }
+        } else if model.status.runState == .failed, !model.status.fatalMessage.isEmpty {
             Text(model.status.fatalMessage)
                 .font(.callout)
                 .foregroundStyle(.red)
@@ -140,18 +154,28 @@ struct StatusHeroCard: View {
         .disabled(model.isBusy || isTransitional || (!isRunning && model.devices.isEmpty))
         .help(model.devices.isEmpty && !isRunning ? L(.connectDisabledHint) : "")
     }
+
+    private var detailsButton: some View {
+        Button {
+            openWindow(id: "details")
+        } label: {
+            Image(systemName: "chart.line.uptrend.xyaxis")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .help(L(.openDetailsWindow))
+    }
 }
 
 /// 状态圆环。
 ///
-/// 运行中时外圈缓慢旋转、内圈呼吸 —— 这是界面上唯一的动效，用来表达「它在活着
-/// 干活」。其余状态一律静止，避免把注意力浪费在没有信息量的动画上。
+/// 过渡状态用外圈旋转表示正在进行中。运行状态保持静止，避免为装饰性动画持续触发
+/// SwiftUI 重绘。
 private struct StatusRing: View {
     let status: SessionStatus
     let accent: Color
 
     @State private var rotation: Double = 0
-    @State private var breathing = false
 
     private var isActive: Bool { status.runState == .running && status.linkUp }
     private var isWorking: Bool { status.runState.isTransitional }
@@ -161,7 +185,6 @@ private struct StatusRing: View {
             Circle()
                 .fill(accent.opacity(0.12))
                 .frame(width: 64, height: 64)
-                .scaleEffect(breathing && isActive ? 1.08 : 1.0)
 
             Circle()
                 .stroke(accent.opacity(0.25), lineWidth: 3)
@@ -192,9 +215,6 @@ private struct StatusRing: View {
             }
         } else {
             rotation = 0
-        }
-        withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
-            breathing = isActive
         }
     }
 }

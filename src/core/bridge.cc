@@ -145,7 +145,7 @@ void Bridge::RunReceiveInjector() noexcept {
       // 置确认位是给 SetPaused(true) 看的：从这里到下一轮看见 paused_ 变回
       // false 之前，本线程不会碰 rx_ring_，所以这个确认是可信的。
       rx_paused_ack_.store(true, std::memory_order_release);
-      std::this_thread::yield();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
 
@@ -164,12 +164,15 @@ void Bridge::RunReceiveInjector() noexcept {
 
       if (rx_batch_.empty()) {
         // 队列空。先自旋一小会儿覆盖「生产者正在写下一帧」这种极短空窗，
-        // 再让出 CPU —— 纯自旋会白烧一个核，直接 yield 又会在高吞吐下抬高延迟。
+        // 再让出 CPU —— 纯自旋会白烧一个核，直接 yield 又会在空闲时反复唤醒。
         if (++idle_spins < config_.rx_spin_before_yield) {
           continue;
         }
         idle_spins = 0;
-        std::this_thread::yield();
+        // `yield()` 只会把线程放回可运行队列；在机器空闲时它可能立刻再次
+        // 获得时间片，导致这个空队列循环持续占用一个 CPU 核。短暂睡眠把
+        // 空闲路径变成真正的阻塞；首包等待约 1 ms，另加线程调度延迟。
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
       idle_spins = 0;

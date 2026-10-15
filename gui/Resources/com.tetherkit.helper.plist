@@ -13,8 +13,8 @@
 
   ★ 为什么没有 KeepAlive ★
     声明了 MachServices 之后，launchd 会在有人连这个服务时**按需**把它拉起来。
-    加 KeepAlive 只会让它在没人用时也常驻，白占内存 —— 而且 helper 一旦跑起来
-    就会一直活着（见 main.swift 末尾的说明），不需要 launchd 帮忙重启。
+    加 KeepAlive 只会让它在没人用时也常驻，白占内存 —— helper 在断开或失败清理后自行退出，
+    下一次连接请求再由 launchd 拉起。
 -->
 <plist version="1.0">
 <dict>
@@ -33,6 +33,10 @@
         <key>com.tetherkit.helper</key>
         <true/>
     </dict>
+
+    <!-- 正常空闲退出后允许快速重连，仍保留一秒重启节流。 -->
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
 
     <!-- 日志。helper 自身的问题（起不来、崩溃）只能从这里看。 -->
     <key>StandardOutPath</key>

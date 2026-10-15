@@ -40,6 +40,11 @@ die() { printf '\033[31m错误：\033[0m%s\n' "$1" >&2; exit 1; }
 [[ -f "${SOURCE_DIR}/${LABEL}" ]] || die "找不到 ${SOURCE_DIR}/${LABEL}
   请先构建：./gui/Scripts/build-gui.sh"
 
+# 终端安装也统一进入管理员安装器，成功后登记本机用户与实际 App 签名。
+if [[ "${TETHERKIT_INSTALLER_ACTIVE:-}" != "1" ]]; then
+  exec "${SOURCE_DIR}/${LABEL}" --install
+fi
+
 # ------------------------------------------------------------------------------
 # 先卸载旧的
 #

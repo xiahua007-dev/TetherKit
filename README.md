@@ -126,13 +126,20 @@ quarantine attribute.
 
 ## Graphical interface
 
-TetherKit.app (SwiftUI) reduces the whole flow to three clicks — pick a device,
-connect, configure IP — and shows live throughput and logs.
+TetherKit.app (SwiftUI) applies DHCP or your last successful static configuration
+automatically when you click Connect. Network settings are under Advanced network settings. Throughput and logs are available in a separate runtime-details
+window when you need them.
 
 It comes in two pieces: `TetherKit.app` runs as a **normal user**, and anything
 that needs root is handed to `tetherkit-helper`, a privileged component launched
-on demand by launchd. Every privileged call carries an authorization credential
-the user has just confirmed. The app itself needs no entitlements.
+on demand by launchd. The helper runs while connecting or connected, and exits after
+disconnection or terminal-failure cleanup. Opening the app, scanning devices, or changing
+language does not start it. Closing or quitting the app preserves an existing connection.
+Installing or updating it requires administrator authorization and
+registers the local user and this app build. Everyday connection operations then use XPC
+code identity checks without asking for an administrator password. A rebuilt app needs
+an authorized helper update. The packaged app uses Hardened Runtime and pins its bundled
+libraries with library load constraints.
 
 The helper's installation payload is embedded in the .app
 (`Contents/Library/HelperTools/`); on first run the app walks you through
@@ -145,6 +152,11 @@ sudo ./gui/Scripts/install-helper.sh
 
 Uninstall: the dashboard has an "Uninstall privileged component…" button at the
 bottom (terminal equivalent: `sudo ./gui/Scripts/uninstall-helper.sh`).
+
+While connected, you can refresh the USB device list and select another device.
+Click “Switch to this device” to disconnect the current one, connect the selected
+one, and apply network settings automatically. Refreshing or selecting alone keeps
+the current connection. MTU and MAC settings remain locked while connected.
 
 The app lets you choose how the virtual interface gets its address:
 
@@ -159,9 +171,12 @@ it — when no other network is available, macOS picks this interface as the
 primary service on its own.
 
 **Background mode**: closing the main window keeps the app in the menu bar
-(the Dock icon is hidden) with live up/down rates on the status item; click it
-for a compact panel with shortcuts back to the main window. The connection
-itself lives in the privileged helper, so quitting the UI never drops it.
+(the Dock icon is hidden). The status item does not show connection details and
+provides an entry back to the main window. The main window only shows connection
+controls; open "Runtime details" when you need the throughput chart and live log.
+That window refreshes once per second while it is visible and stops collecting
+those details when it is closed. The connection itself lives in the privileged
+helper, so quitting the UI never drops it.
 
 **Update check**: "TetherKit → Check for Updates…" checks on demand; the app also
 checks once a day on its own (it only hits GitHub's public Releases API and
@@ -414,3 +429,7 @@ The documents below are written in Chinese.
 ## License
 
 See [LICENSE](LICENSE).
+
+### Daily usage per phone
+
+The device row shows today’s total; click it for daily download, upload, and combined usage. Phones are identified by USB serial number, so totals survive reconnections; devices without a serial number cannot be reliably tracked. Counts cover traffic through TetherKit on this Mac, including local traffic, and may differ from carrier billing. MTU and MAC options are under Advanced device settings. Tracking reuses existing counters and checks, with no idle worker; an abrupt power loss may lose about one minute of unsaved usage.

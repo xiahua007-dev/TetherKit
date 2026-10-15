@@ -31,37 +31,31 @@ struct NetworkCard: View {
     var body: some View {
         Card(title: L(.ipModeLabel), systemImage: "network", accessory: AnyView(interfaceBadge)) {
             VStack(alignment: .leading, spacing: Design.Spacing.small) {
-                modePicker
-
-                switch model.networkConfiguration.mode {
-                case .dhcp:
-                    dhcpExplanation
-                case .manual:
-                    manualForm
-                case .none:
-                    EmptyView()
+                DisclosureGroup(L(.advancedNetwork)) {
+                    VStack(alignment: .leading, spacing: Design.Spacing.small) {
+                        modePicker
+                        switch model.networkConfiguration.mode {
+                        case .dhcp: dhcpExplanation
+                        case .manual:
+                            Text(L(.savedStaticConfiguration)).font(.caption).foregroundStyle(.secondary)
+                            manualForm
+                        case .none: EmptyView()
+                        }
+                        defaultRouteToggle
+                        if interfaceReady { actionRow }
+                        else { Text(L(.nextConnectionConfiguration)).font(.caption).foregroundStyle(.secondary) }
+                    }
+                    .padding(.top, Design.Spacing.small)
                 }
-
-                defaultRouteToggle
-                actionRow
 
                 if interfaceReady {
                     Divider()
                     EffectiveStateView(state: model.networkState,
                                        interface: model.status.systemInterface)
+                    NetworkTestView(model: model)
                 }
             }
-            .disabled(!interfaceReady)
-            .opacity(interfaceReady ? 1 : 0.55)
-            .overlay(alignment: .center) {
-                if !interfaceReady {
-                    Text(L(.connectBeforeConfiguring))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .padding(Design.Spacing.small)
-                        .background(.regularMaterial, in: Capsule())
-                }
-            }
+
         }
     }
 
@@ -208,7 +202,7 @@ struct NetworkCard: View {
                 .frame(minWidth: 56)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(model.isBusy)
+            .disabled(model.isBusy || !model.hasNetworkChanges)
 
             Button(L(.clearConfiguration)) {
                 Task { await model.clearNetworkConfiguration() }
@@ -218,6 +212,92 @@ struct NetworkCard: View {
 
             Spacer()
         }
+    }
+}
+
+/// 一次性网络测试结果。关闭主窗口不会继续刷新这些结果。
+private struct NetworkTestView: View {
+    @Bindable var model: AppModel
+    @State private var resultsExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Design.Spacing.small) {
+            HStack {
+                Text(L(.networkTestSectionTitle))
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Button {
+                    Task { await model.testNetwork() }
+                } label: {
+                    HStack(spacing: Design.Spacing.tight) {
+                        if model.networkTestState.isRunning {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "bolt.horizontal.circle")
+                        }
+                        Text(L(model.networkTestState.isRunning
+                               ? .networkTestRunning : .networkTestButton))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.networkTestState.isRunning)
+                .help(L(.networkTestTooltip))
+            }
+
+            Text(L(.networkTestExplanation))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if case .finished = model.networkTestState {
+                DisclosureGroup(isExpanded: $resultsExpanded) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(model.networkTestState.orderedResults) { result in
+                            HStack(spacing: Design.Spacing.small) {
+                                Image(systemName: result.success
+                                      ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundStyle(result.success ? .green : .red)
+                                Text(result.target.title)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(detail(for: result))
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                if let failure = result.failureDescription {
+                                    Image(systemName: "info.circle")
+                                        .foregroundStyle(.secondary)
+                                        .help(failure)
+                                }
+                            }
+                            .font(.callout)
+                        }
+                    }
+                    .padding(.top, Design.Spacing.tight)
+                } label: {
+                    HStack(spacing: Design.Spacing.small) {
+                        Text(L(.networkTestResults))
+                        StatusBadge(
+                            text: model.networkTestState.failedCount == 0
+                                ? L(.networkTestsPassed)
+                                : L(.networkTestsIssues, model.networkTestState.failedCount),
+                            color: model.networkTestState.failedCount == 0 ? .green : .orange)
+                    }
+                }
+            }
+        }
+        .onChange(of: model.networkTestState, initial: true) { _, state in
+            if case .finished = state { resultsExpanded = state.failedCount > 0 }
+        }
+        .padding(.top, Design.Spacing.tight)
+    }
+
+    private func detail(for result: NetworkTestResult) -> String {
+        guard result.success else { return L(.networkTestFailed) }
+        if result.target == .dns { return L(.networkTestDNSResult) }
+        let milliseconds = result.latencyMilliseconds ?? 0
+        if let statusCode = result.statusCode {
+            return L(.networkTestHTTPResult, statusCode, milliseconds)
+        }
+        return L(.networkTestPingResult, milliseconds)
     }
 }
 

@@ -206,6 +206,19 @@ strip_build_rpath "${PAYLOAD_DIR}/com.tetherkit.helper"
 log "ad-hoc 签名"
 codesign --force --sign - --timestamp=none "${PAYLOAD_DIR}/com.tetherkit.helper" >/dev/null
 codesign --force --sign - --timestamp=none --deep "${APP_DIR}" >/dev/null
+# Hardened Runtime 阻止 DYLD 环境注入；库约束将临时签名依赖锁定到本次构建。
+TRUST_CONSTRAINT="${BUILD_DIR}/tetherkit-library-constraint.plist"
+TRUST_ENTITLEMENTS="${BUILD_DIR}/tetherkit-runtime-entitlements.plist"
+swift "${SCRIPT_DIR}/sign-app.swift" "${APP_DIR}" "${TRUST_CONSTRAINT}"
+cat > "${TRUST_ENTITLEMENTS}" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.apple.security.cs.disable-library-validation</key><true/></dict></plist>
+PLIST
+codesign --force --sign - --timestamp=none --options runtime \
+  --entitlements "${TRUST_ENTITLEMENTS}" --library-constraint "${TRUST_CONSTRAINT}" \
+  --enforce-constraint-validity "${APP_DIR}" >/dev/null
+
 
 # ------------------------------------------------------------------------------
 # 自检

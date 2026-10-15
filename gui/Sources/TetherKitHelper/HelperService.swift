@@ -2,6 +2,15 @@ import Foundation
 import TetherKitCore
 import TetherKitIPC
 
+/// 离线编排测试使用内存会话，生产实现仍只持有 C ABI 会话。
+protocol HelperSession: AnyObject {
+    func start() throws
+    func stop()
+    func status() -> SessionStatus
+    func drainNotices() -> [String]
+}
+extension TetherKitSession: HelperSession {}
+
 /// helper 的 XPC 服务实现。
 ///
 /// ★ 线程模型 ★
@@ -20,7 +29,47 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     /// 保护 session 与 notices。持有时间都极短，用普通锁足够。
     private let stateLock = NSLock()
-    private var session: TetherKitSession?
+    private var session: (any HelperSession)?
+    private var connectionID: UUID?
+    private let usageLedger = UsageLedger()
+    private var todayUsage: DailyUsage?
+    private var networkPhase: NetworkPhase = .idle
+    private var networkMessage = ""
+    private var appliedConfiguration: NetworkConfiguration?
+    private var idleTimer: DispatchSourceTimer?
+    private var idleDeadline: DispatchTime?
+    private var terminalStatus: SessionStatus?
+    private var publish: ((SessionStatus) -> Void)?
+    private var exitWhenIdle: (() -> Void)?
+    private let writeUsage: ([DailyUsage]) throws -> Void
+    private let interfaceTimeout: TimeInterval
+    private let makeSession: (SessionConfiguration) throws -> any HelperSession
+    private let applyConfiguration: (NetworkConfiguration, String) throws -> Void
+    private let queryConfiguration: (String) throws -> NetworkState
+
+    init(interfaceTimeout: TimeInterval = 30,
+         writeUsage: @escaping ([DailyUsage]) throws -> Void = {
+            try HelperRecords.write($0, path: TrafficUsage.path)
+         },
+         makeSession: @escaping (SessionConfiguration) throws -> any HelperSession = {
+            // 新进程先记住设备名称，再打开会话占用 USB；离线测试替换整个工厂。
+            _ = try? TetherKitLibrary.listDevices()
+            return try TetherKitSession(configuration: $0)
+         },
+         applyConfiguration: @escaping (NetworkConfiguration, String) throws -> Void = {
+            try NetworkConfigurator.apply($0, to: $1)
+         },
+         queryConfiguration: @escaping (String) throws -> NetworkState = {
+            try NetworkConfigurator.query(interface: $0)
+         }) {
+        self.writeUsage = writeUsage
+        self.interfaceTimeout = interfaceTimeout
+        self.makeSession = makeSession
+        self.applyConfiguration = applyConfiguration
+        self.queryConfiguration = queryConfiguration
+        super.init()
+    }
+
     /// startSession 正在构造 / 握手中。这段窗口里 session 还没登记，但设备
     /// **已经**被本进程打开了 —— 枚举的占用判定必须把它算进去，否则字符串
     /// 读取会往握手中的控制端点再插一笔传输。
@@ -61,8 +110,21 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         }
     }
 
+    func snapshot() -> SessionStatus {
+        stateLock.withLock { () -> SessionStatus in
+            var status = session?.status() ?? .idle
+            status.connectionID = connectionID
+            status.todayUsage = todayUsage
+            status.networkPhase = networkPhase
+            status.networkMessage = networkMessage
+            status.appliedConfiguration = appliedConfiguration
+            status.savedConfiguration = Self.loadTrust()?.networkConfiguration
+            return status
+        }
+    }
+
     func sessionStatus(reply: @escaping (Data?, String?) -> Void) {
-        let status = withState { $0?.status() } ?? .idle
+        let status = snapshot()
         // 顺带把会话事件收进提示队列 —— 状态轮询本来就是每个刷新周期一次，
         // 搭车过来不用多一次 XPC 往返。
         if let notices = withState({ $0?.drainNotices() }), !notices.isEmpty {
@@ -105,6 +167,22 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             return
         }
 
+        if let language = configuration.language {
+            setLanguage(language.rawValue, reply: {})
+        }
+        start(configuration: configuration, reply: reply)
+    }
+
+    func switchSession(authorization: Data, configuration: Data,
+                       reply: @escaping (String?, Bool) -> Void) {
+        guard let configuration = decode(SessionConfiguration.self, from: configuration, reply: reply),
+              authorize(authorization, reply: reply) else { return }
+        if let language = configuration.language { setLanguage(language.rawValue, reply: {}) }
+        start(configuration: configuration, replacing: true, reply: reply)
+    }
+
+    func start(configuration: SessionConfiguration, replacing: Bool = false,
+               reply: @escaping (String?, Bool) -> Void) {
         lifecycleQueue.async { [weak self] in
             guard let self else { return }
 
@@ -116,24 +194,46 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             // 连不上，只能重装 helper。这个坑真实踩过。
             if let existing = self.withState({ $0 }) {
                 let state = existing.status().runState
-                guard state == .failed || state == .stopped else {
+                guard replacing || state == .failed || state == .stopped else {
                     reply(L(.helperSessionAlreadyRunning), false)
                     return
                 }
-                existing.stop()  // 幂等，只是保险
+                self.networkQueue.sync { existing.stop() }
+                self.recordUsage(existing.status(), force: true)  // 等旧配置完成后才允许复用网卡
                 self.stateLock.withLock { self.session = nil }
             }
 
             // 从构造到 start() 返回的整个握手期间把「设备已被持有」亮出来，
             // 让并发到来的 listDevices 跳过字符串读取（见那边的说明）。
+            self.idleDeadline = nil
+            self.terminalStatus = nil
             self.stateLock.withLock { self.sessionStarting = true }
             defer { self.stateLock.withLock { self.sessionStarting = false } }
             do {
-                let session = try TetherKitSession(configuration: configuration)
+                let session = try self.makeSession(configuration)
+                self.usageLedger.begin(deviceKey: configuration.usageDevice.flatMap(TrafficUsage.key))
+                self.stateLock.withLock { self.todayUsage = nil }
                 try session.start()
-                self.stateLock.withLock { self.session = session }
+                let id = UUID()
+                self.stateLock.withLock {
+                    self.session = session
+                    self.connectionID = id
+                    self.networkPhase = .waitingForInterface
+                    self.networkMessage = ""
+                    self.appliedConfiguration = nil
+                }
+                self.publish?(self.snapshot())
+                self.waitForInterface(session, id: id,
+                                      configuration: configuration.networkConfiguration,
+                                      deadline: .now() + self.interfaceTimeout)
                 reply(nil, false)
             } catch {
+                var failed = SessionStatus.idle
+                failed.runState = .failed
+                failed.fatalMessage = error.localizedDescription
+                self.terminalStatus = failed
+                self.idleDeadline = .now() + .milliseconds(500)
+                self.publish?(failed)
                 reply(error.localizedDescription, false)
             }
         }
@@ -141,17 +241,30 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
 
     func stopSession(authorization: Data, reply: @escaping (String?, Bool) -> Void) {
         guard authorize(authorization, reply: reply) else { return }
+        stop(reply: reply)
+    }
 
+    func stop(reply: @escaping (String?, Bool) -> Void) {
         lifecycleQueue.async { [weak self] in
             guard let self else { return }
             // 先把 session 从状态里摘出来再停：停机要 join 控制线程、可能耗时
             // 数百毫秒，期间不该继续对外声称「会话在运行」。
-            let session = self.stateLock.withLock { () -> TetherKitSession? in
-                defer { self.session = nil }
+            let session = self.stateLock.withLock { () -> (any HelperSession)? in
+                defer {
+                    self.session = nil
+                    self.connectionID = nil
+                    self.networkPhase = .idle
+                    self.networkMessage = ""
+                    self.appliedConfiguration = nil
+                }
                 return self.session
             }
-            session?.stop()
+            self.networkQueue.sync { session?.stop() }
+            if let session { self.recordUsage(session.status(), force: true) }
             self.appendNotices([L(.helperSessionStopped)])
+            self.terminalStatus = nil
+            self.idleDeadline = .now() + .milliseconds(500)
+            self.publish?(self.snapshot())
             reply(nil, false)
         }
     }
@@ -162,6 +275,11 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
               authorize(authorization, reply: reply) else {
             return
         }
+        applyOwnedNetwork(interface: interface, configuration: configuration, reply: reply)
+    }
+
+    func applyOwnedNetwork(interface: String, configuration: NetworkConfiguration,
+                           reply: @escaping (String?, Bool) -> Void) {
         // 界面已经校验过一遍，但 XPC 是任何本机进程都能连的，helper 必须自己再挡
         // 一道 —— 而且用的是同一份规则，不会出现两边判断不一致。
         if let message = NetworkValidator.validationMessage(for: configuration) {
@@ -169,15 +287,151 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
             return
         }
 
-        // DHCP 会阻塞到拿到租约（库内部上限 10 秒），所以必须异步回复。
-        networkQueue.async { [weak self] in
-            do {
-                try NetworkConfigurator.apply(configuration, to: interface)
-                self?.appendNotices([L(.helperNetworkApplied, configuration.mode.displayName)])
-                reply(nil, false)
-            } catch {
-                reply(error.localizedDescription, false)
+        guard let (session, id) = stateLock.withLock({ () -> (any HelperSession, UUID)? in
+            guard let session, let id = connectionID,
+                  session.status().runState == .running,
+                  session.status().systemInterface == interface else { return nil }
+            return (session, id)
+        }) else {
+            reply(L(.interfaceNotReadyYet), false)
+            return
+        }
+        networkQueue.async { [self] in
+            guard isCurrent(session, id: id) else {
+                reply(L(.interfaceNotReadyYet), false)
+                return
             }
+            reply(configure(session, id: id, configuration: configuration), false)
+        }
+    }
+
+    private func isCurrent(_ candidate: any HelperSession, id: UUID) -> Bool {
+        stateLock.withLock { session === candidate && connectionID == id }
+    }
+
+    /// 有界等待只存在于连接期间，不依赖 App 窗口或状态轮询。
+    private func waitForInterface(_ session: any HelperSession, id: UUID,
+                                  configuration: NetworkConfiguration,
+                                  deadline: DispatchTime) {
+        networkQueue.asyncAfter(deadline: .now() + .milliseconds(100)) { [self] in
+            guard isCurrent(session, id: id) else { return }
+            let status = session.status()
+            if status.runState == .running, !status.systemInterface.isEmpty {
+                _ = configure(session, id: id, configuration: configuration)
+            } else if status.runState == .failed || status.runState == .stopped {
+                stateLock.withLock {
+                    networkPhase = .failed
+                    networkMessage = status.fatalMessage
+                }
+            } else if DispatchTime.now() >= deadline {
+                session.stop()
+                guard isCurrent(session, id: id) else { return }
+                stateLock.withLock {
+                    networkPhase = .failed
+                    networkMessage = L(.connectionTimedOut)
+                }
+            } else {
+                waitForInterface(session, id: id, configuration: configuration, deadline: deadline)
+            }
+        }
+    }
+
+    private func configure(_ session: any HelperSession, id: UUID,
+                           configuration: NetworkConfiguration) -> String? {
+        defer {
+            lifecycleQueue.async { [weak self] in
+                guard let self, self.isCurrent(session, id: id) else { return }
+                self.publish?(self.snapshot())
+            }
+        }
+        guard isCurrent(session, id: id) else { return L(.interfaceNotReadyYet) }
+        stateLock.withLock { networkPhase = .configuring; networkMessage = "" }
+        do {
+            if let message = NetworkValidator.validationMessage(for: configuration) {
+                throw NSError(domain: "TetherKit", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            let interface = session.status().systemInterface
+            try applyConfiguration(configuration, interface)
+            let actual = try queryConfiguration(interface)
+            guard session.status().runState == .running,
+                  configuration.mode == .none || actual.hasAddress else {
+                throw NSError(domain: "TetherKit", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: L(.addressConfigurationFailed)])
+            }
+            guard isCurrent(session, id: id) else { return L(.interfaceNotReadyYet) }
+            if configuration.mode != .none, var trust = Self.loadTrust() {
+                trust.networkConfiguration = configuration
+                try trust.save()
+            }
+            stateLock.withLock {
+                networkPhase = configuration.mode == .none ? .idle : .ready
+                appliedConfiguration = configuration.mode == .none ? nil : configuration
+            }
+            return nil
+        } catch {
+            if isCurrent(session, id: id) {
+                stateLock.withLock {
+                    networkPhase = .failed
+                    networkMessage = error.localizedDescription
+                }
+            }
+            return error.localizedDescription
+        }
+    }
+
+    /// 仅生产入口启用；定时器只在 helper 已运行时检查终止状态，不会唤醒新进程。
+    func enableIdleExit(publish: @escaping (SessionStatus) -> Void,
+                        exit: @escaping () -> Void) {
+        lifecycleQueue.async { [self] in
+            self.publish = publish
+            self.exitWhenIdle = exit
+            idleDeadline = .now() + .seconds(2)
+            publish(snapshot())
+            let timer = DispatchSource.makeTimerSource(queue: lifecycleQueue)
+            timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+            timer.setEventHandler { [weak self] in self?.checkIdle() }
+            idleTimer = timer
+            timer.resume()
+        }
+    }
+
+    /// 生命周期队列上执行，新的 start/switch 会在同一队列取消退出计划。
+    private func checkIdle() {
+        var current = snapshot()
+        recordUsage(current, force: current.runState == .failed || current.runState == .stopped)
+        current.todayUsage = stateLock.withLock { todayUsage }
+        if current.runState == .starting || current.runState == .running
+            || current.runState == .stopping {
+            idleDeadline = nil
+            return
+        }
+        if terminalStatus == nil, current.runState == .failed || current.runState == .stopped {
+            terminalStatus = current
+            if let session = withState({ $0 }) { networkQueue.sync { session.stop() } }
+        }
+        let status = terminalStatus ?? current
+        publish?(status)
+        if idleDeadline == nil { idleDeadline = .now() + .milliseconds(500) }
+        if let idleDeadline, DispatchTime.now() >= idleDeadline {
+            idleTimer?.cancel()
+            self.idleTimer = nil
+            exitWhenIdle?()
+        }
+    }
+
+    /// 仅复用生命周期定时器；数据收发线程不增加任何操作。
+    private func recordUsage(_ status: SessionStatus, force: Bool = false) {
+        let day = TrafficUsage.day()
+        do {
+            if usageLedger.needsDayFlush(day) {
+                try usageLedger.saveIfNeeded(now: ProcessInfo.processInfo.systemUptime, force: true, write: writeUsage)
+            }
+            let entry = usageLedger.sample(rx: status.rxBytes, tx: status.txBytes, day: day)
+            stateLock.withLock { todayUsage = entry }
+            try usageLedger.saveIfNeeded(now: ProcessInfo.processInfo.systemUptime, force: force, write: writeUsage)
+        } catch {
+            appendNotices([L(.usageSaveFailed, error.localizedDescription)])
         }
     }
 
@@ -189,25 +443,43 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
     /// 内核里。落盘登记能兜住 SIGKILL，但能优雅退出时还是该优雅退出 ——
     /// 那样连「下次启动清理」这一步都省了。
     func shutdown() {
-        let session = stateLock.withLock { () -> TetherKitSession? in
-            defer { self.session = nil }
-            return self.session
+        lifecycleQueue.sync {
+            idleTimer?.cancel()
+            idleTimer = nil
+            let session = stateLock.withLock { () -> (any HelperSession)? in
+                defer { self.session = nil }
+                return self.session
+            }
+            networkQueue.sync { session?.stop() }
+            if let session { recordUsage(session.status(), force: true) }
+            publish?(.idle)
         }
-        session?.stop()
     }
 
     // MARK: - 内部工具
 
-    /// 复核授权；不通过时回复错误并把第二个参数置为 true，告诉 App
-    /// 「这是授权问题，重新弹框再来一次也许就成了」。
+    /// 普通操作核验真实 XPC 用户；代码身份由 listener 的系统约束核验。
+    /// authorization 参数暂留在协议中，运行权限不依赖客户端传来的数据。
     private func authorize(_ data: Data, reply: @escaping (String?, Bool) -> Void) -> Bool {
-        do {
-            try AuthorizationVerifier.verify(externalForm: data)
-            return true
-        } catch {
-            reply(error.localizedDescription, true)
+        // listener 已设置系统代码签名要求；方法内再核对当前连接用户。
+        guard let connection = NSXPCConnection.current(),
+              let trust = Self.loadTrust(),
+              connection.effectiveUserIdentifier == trust.userID else {
+            reply(L(.appTrustRequired), false)
             return false
         }
+        return true
+    }
+
+    static func loadTrust() -> AppTrust? {
+        var metadata = stat()
+        guard lstat(AppTrust.path, &metadata) == 0,
+              metadata.st_uid == 0, metadata.st_mode & 0o177 == 0,
+              metadata.st_mode & S_IFMT == S_IFREG,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: AppTrust.path)),
+              let trust = try? JSONDecoder().decode(AppTrust.self, from: data),
+              trust.isValid else { return nil }
+        return trust
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data,
@@ -228,7 +500,7 @@ final class HelperService: NSObject, TetherKitHelperProtocol {
         }
     }
 
-    private func withState<T>(_ body: (TetherKitSession?) -> T) -> T {
+    private func withState<T>(_ body: ((any HelperSession)?) -> T) -> T {
         stateLock.withLock { body(session) }
     }
 
@@ -261,14 +533,11 @@ final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate {
 
     func listener(_ listener: NSXPCListener,
                   shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        // ★ 为什么这里无条件接受 ★
-        //
-        //   安全性不建立在「谁能连上」，而建立在「每次特权调用都要附带一份用户刚
-        //   确认过的授权凭据」。这是刻意的选择：另一条路是校验调用方的代码签名
-        //   （SMJobBless 的做法），但那依赖证书的 designated requirement，而源码
-        //   分发下每台机器编出的 cdhash 都不同，写死的 DR 必然对不上。
-        //
-        //   对开源、源码分发的工具，凭据复核是更合适的模型：谁编译的都一样安全。
+        guard let trust = HelperService.loadTrust(),
+              connection.effectiveUserIdentifier == trust.userID,
+              let requirement = trust.requirement else { return false }
+        // 由 XPC 对每条消息核对真实代码身份，避免 PID 复用和客户端路径伪造。
+        connection.setCodeSigningRequirement(requirement)
         connection.exportedInterface = NSXPCInterface(with: TetherKitHelperProtocol.self)
         connection.exportedObject = service
         connection.resume()

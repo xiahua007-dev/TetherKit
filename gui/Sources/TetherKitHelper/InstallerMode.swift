@@ -1,5 +1,6 @@
 import Darwin
 import TetherKitIPC
+import TetherKitCore
 import Foundation
 
 /// 「App 内一键安装 / 卸载」的执行入口：本二进制以 `--install` 或 `--uninstall`
@@ -34,6 +35,9 @@ func runInstallerModeIfRequested() {
 
     dup2(STDOUT_FILENO, STDERR_FILENO)
 
+    let installingUser = getuid() == 0
+        ? UInt32(ProcessInfo.processInfo.environment["SUDO_UID"] ?? "") ?? 0 : getuid()
+
     guard setgid(0) == 0, setuid(0) == 0 else {
         print(L(.installerNeedsRoot, Int(geteuid()), Int(getuid()))
               + L(.installerUseTerminal, scriptName))
@@ -49,9 +53,36 @@ func runInstallerModeIfRequested() {
         exit(1)
     }
 
-    // execv 不返回；返回即失败。
-    var argv: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/bash"), strdup(script), nil]
-    execv("/bin/bash", &argv)
-    perror("execv /bin/bash")
-    exit(1)
+    do {
+        // 在安装成功后才原子提交信任，失败时保留旧记录。
+        let app = executable.deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        var trust: AppTrust? = scriptName == "install-helper.sh"
+            ? AppTrust(userID: installingUser, codeHash: try AppTrust.hash(of: app)) : nil
+        if let previous = HelperService.loadTrust(), previous.userID == installingUser {
+            trust?.networkConfiguration = previous.networkConfiguration
+        }
+        if let trust, !trust.isValid { throw AppTrust.Failure.invalidCode }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [script]
+        var environment = ProcessInfo.processInfo.environment
+        environment["TETHERKIT_INSTALLER_ACTIVE"] = "1"
+        process.environment = environment
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { exit(process.terminationStatus) }
+        if let trust {
+            try? FileManager.default.removeItem(atPath: HelperRecords.runtimePath)
+            try HelperRecords.write(HelperInstallation(
+                userID: trust.userID, codeHash: trust.codeHash,
+                revision: HelperConstants.protocolRevision,
+                version: TetherKitLibrary.versionInfo.version), path: HelperRecords.installationPath)
+            try trust.save()
+        }
+        exit(0)
+    } catch {
+        print(error.localizedDescription)
+        exit(1)
+    }
 }

@@ -11,11 +11,11 @@ import TetherKitIPC
 /// ★ 后台运行模式 ★
 ///
 ///   关闭主窗口不退出：App 退到「仅菜单栏」（accessory 激活策略，程序坞图标
-///   一并隐藏），菜单栏项继续显示实时速率。会话本来就跑在 helper 里，App 的
-///   存在与否都不影响它 —— 但只要 App 活着，用户就有一个随时能看一眼的入口。
+///   一并隐藏），菜单栏不显示连接详情，只提供打开主窗口的入口和基础操作。
+///   会话本来就跑在 helper 里，App 的存在与否都不影响它。
 ///
-///   轮询在窗口关闭后**不**停（菜单栏靠它喂数据），只是在「窗口关着且会话
-///   没跑」时放慢到 2 秒一次，见 AppModel.pollDelay。
+///   主窗口可见时每秒轮询一次；窗口关闭后停止界面轮询，避免后台持续驱动 XPC
+///   请求和 SwiftUI 重绘。
 @main
 struct TetherKitApplication: App {
     @State private var model = AppModel()
@@ -45,6 +45,12 @@ struct TetherKitApplication: App {
         // 没有意义，反而会让多个实例同时轮询同一个 helper。
         .defaultSize(width: Design.Window.defaultWidth, height: Design.Window.defaultHeight)
         .windowResizability(.contentMinSize)
+
+        Window(L(.detailsWindowTitle), id: "details") {
+            DetailsWindow(model: model)
+        }
+        .defaultSize(width: 680, height: 760)
+        .windowResizability(.contentMinSize)
         .commands {
             // 「新建窗口」对单窗口应用没有意义，去掉免得用户点了没反应。
             CommandGroup(replacing: .newItem) {}
@@ -53,14 +59,11 @@ struct TetherKitApplication: App {
             CommandGroup(after: .appInfo) { AppMenuItems(model: model) }
         }
 
-        // 菜单栏常驻项：图标 + 实时速率。
-        //
-        // 用 .window 风格给一块小面板而不是一列菜单 —— 速率、地址这些信息是要
-        // 「看」的，不是要「选」的，菜单条目装不下。
+        // 菜单栏常驻项：固定图标，详情统一放在主窗口。
         MenuBarExtra {
             MenuBarPanel(model: model)
         } label: {
-            MenuBarLabel(model: model)
+            MenuBarLabel()
         }
         .menuBarExtraStyle(.window)
     }
@@ -144,8 +147,7 @@ private struct MainWindowRoot: View {
             // 强制整棵树重建 —— 语言切换是极低频动作，这点代价无所谓。
             .id(model.languageRevision)
             .task {
-                // 轮询在这里启动（幂等）。窗口关闭后它继续跑 ——
-                // 这正是菜单栏能实时更新的前提。
+                // 这里只做一次性初始化；窗口可见时的轮询由 onAppear 启动。
                 model.start()
             }
             .onAppear {

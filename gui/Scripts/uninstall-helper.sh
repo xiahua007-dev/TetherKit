@@ -25,7 +25,7 @@ if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
 fi
 
 log "删除文件"
-rm -f "${PLIST_PATH}" "${INSTALL_PATH}"
+rm -f "${PLIST_PATH}" "${INSTALL_PATH}" "${TOOLS_DIR}/com.tetherkit.trust.json" "${TOOLS_DIR}/com.tetherkit.installation.json" "/var/run/com.tetherkit.helper-status.json"
 rm -f "${TOOLS_DIR}"/libtetherkit*.dylib "${TOOLS_DIR}"/libusb-*.dylib
 
 # 兜底：helper 若曾被强杀，登记文件里可能还留着没销毁的网卡。

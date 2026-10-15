@@ -72,9 +72,15 @@ listener.resume()
 
 writeToStandardError(L(.helperReady, TetherKitLibrary.versionInfo.version))
 
-// 阻塞在主 runloop 上。
-//
-// 刻意**不**做「空闲一段时间就退出」：会话跑起来之后，helper 拥有 feth 网卡与
-// BPF 描述符，退出就等于把用户的网络断掉。LaunchDaemon 是按需拉起的，
-// 一直活着并不会在没人用时占资源 —— 因为那时根本没被拉起来。
+// 空闲退出不取决于 App 是否存活；活动会话始终由 helper 持有。
+service.enableIdleExit(publish: { status in
+    do {
+        try HelperRecords.write(HelperRuntimeRecord(processID: getpid(), status: status),
+                                path: HelperRecords.runtimePath)
+    } catch {
+        writeToStandardError(error.localizedDescription)
+    }
+}, exit: {
+    exit(0)
+})
 dispatchMain()

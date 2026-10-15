@@ -316,8 +316,10 @@ void Runtime::Teardown() {
   //    DataChannel::Shutdown() 等在飞 USB 传输全部回收。这一步必须在销毁
   //    device_ 之前完成 —— libusb_close 不会帮我们回收在飞 transfer，
   //    先关句柄再释放 transfer 就是 use-after-free。
+  BridgeStats final_stats;
   if (bridge_ != nullptr) {
     bridge_->Stop();
+    final_stats = bridge_->Snapshot();
     bridge_.reset();
   }
   data_channel_.reset();
@@ -349,7 +351,7 @@ void Runtime::Teardown() {
   // 6. 最后停 libusb 事件线程并释放上下文。
   usb_context_.reset();
 
-  // 拆完再刷一次：网卡名、统计都该归零，GUI 不该继续显示已经不存在的网卡。
+  // 拆完清空网卡名；最终统计保留供用量记账，避免遗漏最后一批数据。
   // link_up 由事件维护、RefreshSnapshot 不会动它，所以在这里显式清掉 ——
   // 停机后界面上还亮着「链路已连接」会误导人。
   {
@@ -357,6 +359,10 @@ void Runtime::Teardown() {
     snapshot_.link_up = false;
   }
   RefreshSnapshot();
+  {
+    const std::lock_guard<std::mutex> guard(snapshot_mutex_);
+    snapshot_.bridge = final_stats;
+  }
   TETHERKIT_INFO_TR(Msg::kCoreStopped);
 }
 

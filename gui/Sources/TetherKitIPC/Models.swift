@@ -23,18 +23,23 @@ public struct SessionConfiguration: Codable, Hashable, Sendable {
     public var mtu: UInt32
     /// 是否把系统侧网卡的 MAC 设为设备汇报的地址。
     public var adoptDeviceMAC: Bool
+    public var networkConfiguration: NetworkConfiguration
+    public var language: Language?
+    public var usageDevice: DeviceDescriptor?
 
     public init(vendorID: UInt16 = 0,
                 productID: UInt16 = 0,
                 busNumber: UInt8 = 0,
                 deviceAddress: UInt8 = 0,
                 mtu: UInt32 = 1500,
-                adoptDeviceMAC: Bool = true) {
+                adoptDeviceMAC: Bool = true,
+                networkConfiguration: NetworkConfiguration = .dhcp) {
         self.vendorID = vendorID
         self.productID = productID
         self.busNumber = busNumber
         self.deviceAddress = deviceAddress
         self.mtu = mtu
+        self.networkConfiguration = networkConfiguration
         self.adoptDeviceMAC = adoptDeviceMAC
     }
 }
@@ -97,6 +102,12 @@ public struct SessionStatus: Codable, Hashable, Sendable {
     public var monotonicNanos: Int64
 
     /// runState == .failed 时的原因。
+    public var connectionID: UUID?
+    public var todayUsage: DailyUsage?
+    public var networkPhase: NetworkPhase = .idle
+    public var networkMessage: String = ""
+    public var appliedConfiguration: NetworkConfiguration?
+    public var savedConfiguration: NetworkConfiguration?
     public var fatalMessage: String
 
     /// 未连接时的空状态。
@@ -316,7 +327,7 @@ public struct LogEntry: Codable, Hashable, Identifiable, Sendable {
 /// helper 一次「取走待处理内容」的应答。
 ///
 /// 事件与日志合并成一次调用，是为了把 XPC 往返次数压到每个刷新周期一次 ——
-/// 界面每 500 ms 刷一次，分开取就是双倍的进程间往返。
+/// 界面每秒刷新一次，分开取就是双倍的进程间往返。
 public struct HelperFeed: Codable, Sendable {
     public var logs: [LogEntry]
     /// 被丢弃的日志条数（缓冲写满时丢最旧的）。界面据此提示「日志有缺口」。
@@ -356,4 +367,9 @@ public struct EnvironmentReport: Codable, Hashable, Sendable {
         self.buildDescription = buildDescription
         self.libusbVersion = libusbVersion
     }
+}
+
+/// 地址配置状态独立于底层数据通道状态。
+public enum NetworkPhase: String, Codable, Sendable {
+    case idle, waitingForInterface, configuring, ready, failed
 }

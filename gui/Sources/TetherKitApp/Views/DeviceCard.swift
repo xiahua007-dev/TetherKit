@@ -3,10 +3,12 @@ import TetherKitIPC
 
 /// 设备选择与会话参数。
 ///
-/// 会话跑起来之后整块变成只读 —— 改 MTU 或换设备都需要重连，做成「能改但不生效」
-/// 比直接禁用更让人困惑。
+/// 运行中允许刷新和选择其他设备；只有明确点击切换才会中断当前连接。
+/// MTU 与 MAC 策略仍在运行中保持只读。
 struct DeviceCard: View {
     @Bindable var model: AppModel
+    @State private var showingSettings = false
+    @State private var usageDevice: DeviceDescriptor?
 
     private var isLocked: Bool {
         model.status.runState == .running || model.status.runState.isTransitional
@@ -21,10 +23,31 @@ struct DeviceCard: View {
             } else {
                 VStack(alignment: .leading, spacing: Design.Spacing.medium) {
                     devicePicker
-                    Divider()
-                    tuningControls
+                    if model.canSwitchDevice {
+                        Button(L(.switchToSelectedDevice)) {
+                            Task { await model.switchDevice() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isBusy || model.isRefreshingDevices)
+                        .help(L(.switchDeviceHelp))
+                    }
+                    Button(L(.deviceSettings), systemImage: "slider.horizontal.3") {
+                        showingSettings = true
+                    }
+                    .buttonStyle(.borderless)
                 }
             }
+        }
+        .sheet(isPresented: $showingSettings) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(L(.deviceSettings)).font(.headline)
+                Text(L(.deviceSettingsScope)).font(.caption).foregroundStyle(.secondary)
+                tuningControls
+                HStack { Spacer(); Button(L(.ok)) { showingSettings = false } }
+            }.padding(24).frame(width: 480)
+        }
+        .sheet(item: $usageDevice) { device in
+            UsageHistoryView(device: device, model: model)
         }
     }
 
@@ -32,11 +55,18 @@ struct DeviceCard: View {
         Button {
             Task { await model.refreshDevices() }
         } label: {
-            Image(systemName: "arrow.clockwise")
+            if model.isRefreshingDevices {
+                HStack(spacing: Design.Spacing.tight) {
+                    ProgressView().progressViewStyle(.circular).controlSize(.small)
+                    Text(L(.refreshingUSBDevices)).font(.caption)
+                }
+            } else {
+                Image(systemName: "arrow.clockwise")
+            }
         }
         .buttonStyle(.borderless)
-        .disabled(isLocked)
-        .help(L(isLocked ? .cannotRescanWhileRunning : .rescanUSBDevices))
+        .disabled(model.isRefreshingDevices || model.isBusy || model.status.runState.isTransitional)
+        .help(L(.rescanUSBDevices))
     }
 
     private var emptyState: some View {
@@ -58,8 +88,13 @@ struct DeviceCard: View {
         VStack(alignment: .leading, spacing: Design.Spacing.small) {
             ForEach(model.devices) { device in
                 DeviceRow(device: device,
+                          usage: model.usageRecords.first { $0.deviceKey == TrafficUsage.key(for: device)
+                              && $0.day == TrafficUsage.day() },
+                          onUsage: { model.reloadUsage(); usageDevice = device },
                           isSelected: (model.selectedDevice?.id == device.id),
-                          isLocked: isLocked) {
+                          isLocked: model.isBusy || model.status.runState.isTransitional,
+                          isConnected: model.status.runState == .running
+                              && device.summary == model.status.deviceDescription) {
                     model.selectedDeviceID = device.id
                 }
             }
@@ -109,40 +144,60 @@ struct DeviceCard: View {
 /// 设备列表里的一行。
 private struct DeviceRow: View {
     let device: DeviceDescriptor
+    let usage: DailyUsage?
+    let onUsage: () -> Void
     let isSelected: Bool
     let isLocked: Bool
+    let isConnected: Bool
     let onSelect: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: Design.Spacing.small) {
-                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+        HStack(spacing: Design.Spacing.small) {
+            Button(action: onSelect) {
+                HStack(spacing: Design.Spacing.small) {
+                    Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(device.displayName)
-                        .font(.callout)
-                        .foregroundStyle(.primary)
-                    HStack(spacing: Design.Spacing.tight) {
-                        Text(device.summary)
-                            .font(.system(.caption, design: .monospaced))
-                        if !device.serial.isEmpty {
-                            Text("SN \(device.serial)")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(device.displayName)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                        HStack(spacing: Design.Spacing.tight) {
+                            Text(device.summary)
                                 .font(.system(.caption, design: .monospaced))
+                            if !device.serial.isEmpty {
+                                Text("SN \(device.serial)")
+                                    .font(.system(.caption, design: .monospaced))
+                            }
                         }
+                        .foregroundStyle(.secondary)
                     }
-                    .foregroundStyle(.secondary)
                 }
-
-                Spacer(minLength: 0)
-
-                if device.usedAndroidQuirk {
-                    // 这条信息对排障很有用：走了兜底路径说明设备的 CDC 描述符不
-                    // 规范，日后若出问题这是第一个该看的线索。
-                    StatusBadge(text: L(.compatibilityMode), color: .orange)
-                        .help(L(.compatibilityModeTooltip))
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(isLocked)
+
+            Button(action: onUsage) {
+                Text(TrafficUsage.key(for: device) == nil ? L(.usageUntracked)
+                     : L(.todayUsage, TrafficUsage.formatted(usage?.total ?? 0)))
+                    .font(.callout.monospacedDigit())
+            }
+            .buttonStyle(.borderless)
+            .help(L(.usageScope))
+            .frame(maxWidth: .infinity)
+
+            if isConnected {
+                StatusBadge(text: L(.currentUSBDevice), color: .green)
+            }
+            if device.usedAndroidQuirk {
+                // 这条信息对排障很有用：走了兜底路径说明设备的 CDC 描述符不
+                // 规范，日后若出问题这是第一个该看的线索。
+                StatusBadge(text: L(.compatibilityMode), color: .orange)
+                    .help(L(.compatibilityModeTooltip))
+            }
+        }
             .padding(Design.Spacing.small)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(isSelected ? Color.accentColor.opacity(0.10) : Color.clear,
@@ -152,8 +207,5 @@ private struct DeviceRow: View {
                     .strokeBorder(isSelected ? Color.accentColor.opacity(0.4) : .clear,
                                   lineWidth: 1))
             .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isLocked)
     }
 }

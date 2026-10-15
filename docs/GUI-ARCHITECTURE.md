@@ -8,6 +8,51 @@
 
 ---
 
+## 2026-10-15 每台手机每日流量
+
+- 协议修订号 **6**。启动配置携带所选设备描述，状态携带当日累计。设备标识为 VID/PID/序列号的 SHA-256，拔插、App/helper重启后继续累计；无序列号时显示无法累计，不按型号混账。
+- `UsageLedger` 仅在helper生命周期串行队列运行，复用现有1秒检查和现成收发计数，不增加数据热路径操作、定时器或空闲helper。App退出仍统计。
+- 按本机日期累计下载/上传。跨午夜的采样增量归入新日期，边界误差约一个采样周期；时区或时钟改变按下一次采样的本机日期归档，不覆盖既有记录。
+- 有变化才保存，普通保存最多每60秒一次，跨日及断开/失败/优雅退出强制保存。突然断电或SIGKILL最多可能丢失约一分钟未保存增量。保存失败保留内存脏数据，普通重试仍限频，并报告本地化提示。
+- 文件 `/Library/PrivilegedHelperTools/com.tetherkit.usage.json`，root所有0644，保存日期、散列设备键和字节计数，不保存明文序列号。更新/卸载保留历史。读取遵循HelperRecords的文件身份校验。
+- Runtime在桥接线程停止后保留最终统计快照，接口名仍清空，保证最后一批数据可记账；未增加收发线程工作。
+- 设备行显示“今日用量”，点击打开每日下载/上传/合计列表。MTU/MAC移至设备高级设置弹窗，仍是下一次连接的会话参数，运行时不可修改。
+- 统计口径为此Mac经TetherKit的以太帧传输，包含局域网流量；不是手机全部流量或运营商账单。
+
+## 2026-10-15 特权组件按需生命周期（当前实现）
+
+- XPC 修订号 **5**，新增 helper 内的原子 `switchSession`；启动配置携带语言。空闲时的语言同步不发 XPC，避免误唤醒。
+- 安装器发布 root 所有、0644 的 `com.tetherkit.installation.json`，仅包含获准 UID、App cdhash、协议号及版本。私有 `com.tetherkit.trust.json` 仍为0600，运行权限仍以它和真实 XPC 身份为准。安装元数据仅用于非唤醒式展示，不能授予权限。
+- helper 在 `/var/run/com.tetherkit.helper-status.json` 发布 PID 和关键状态；App 通过核对进程可执行路径发现活动 helper，PID只用于存活探测。该记录不含日志，在退出前保留终态错误。
+- helper新进程在占用USB前预读名称；App在跨进程枚举返回空描述符时按设备ID及VID/PID回填已知字符串，设备离场则清除，避免名称退化。
+- App 空闲时只读本地文件、用普通用户能力做环境预检和USB枚举；不发版本/状态/日志XPC，不因打开窗口、切语言或刷新设备启动helper。已连接时仍由helper枚举，避开被占用设备字符串读取。
+- 新连接由Mach服务按需拉起helper。断开完成清理并回复后，经过500ms缓冲，由每秒一次的生命周期检查退出（通常不超过约1.5秒）；启动后没有会话时约2秒退出。新连接在生命周期队列取消退出计划。
+- helper在starting/running/stopping时保持存活，不依赖App轮询；手机断开/会话失败后清理并发布原始终态再退出。配网失败但数据通道仍running时保留进程，允许原会话重试。
+- 切换设备在helper同一生命周期操作内停旧连新，中间不进入空闲退出。客户端停止后丢弃XPC连接；连接正好遇到空闲退出时，仅对不可达错误重建并重试一次。
+- `ThrottleInterval=1`，支持退出后快速重连。安装/卸载移除陈旧运行记录；正常休眠显示“按需启动”，不误报组件缺失或授权失效。
+- 离线验证48项通过，含空闲/失败退出、活动会话无App轮询时保持、原子切换不退出，以及非唤醒安装探测；真机结果另记交接文件。
+
+下文涉及“helper永远常驻”的历史说明已被本节取代。
+
+## 2026-10-15 连接与授权调整（当前实现）
+
+以下规则取代下文历史版本中的逐次管理员凭据复核说明：
+
+- 协议修订号为 **4**，会话配置增加固定的网络配置快照；状态增加连接 UUID、配网阶段、错误、实际应用配置及最后成功配置。
+- helper 在连接期间每 100ms 有界等待网卡（最多 30 秒），随后下发配置并真实回读。窗口关闭不会停止编排；没有新增常驻 UI 轮询。
+- 生命周期与配网队列通过停机屏障串联；旧任务按会话对象和 UUID 失效。配置接口只接受当前 running 会话拥有的系统侧接口。
+- USB 设备列表在连接期间也允许手动刷新与每 2 秒发现；helper 仍跳过占用期间的字符串读取。当前连接通过稳定的 `deviceDescription`（C++ `Describe()` 的固定 Bus/Device/VID:PID 格式）匹配设备行，与用户待切换的选择分开。
+- 刷新失败保留原列表并在手动操作时报告错误。明确点击切换后固定目标和配置快照，确认目标仍在线，再等待停止完成后启动新设备；目标消失或停止失败不能中断/替换原连接。启动失败显示错误，不声称原连接仍在。切换请求受理后进入 starting，防止重复操作。
+- 地址失败保留数据通道和重试入口；等待网卡超时停止未完成会话。全局默认路由仍只由配置开关决定。
+- 高级设置的草稿独立于成功配置；撤销不会保存为连接模式。成功配置由 helper 写入 root 信任记录，并由 App 同步到用户偏好，覆盖 App 关闭期间完成配置的情况。
+- 安装器保留真实调用用户 UID，在管理员安装成功后原子登记该 UID 与实际签名 cdhash。记录位于 `/Library/PrivilegedHelperTools/com.tetherkit.trust.json`，root 所有、0600；卸载删除它，同用户更新保留成功配置。
+- listener 检查内核提供的有效 UID，并用 `NSXPCConnection.setCodeSigningRequirement` 对每条消息施加 cdhash 要求，不通过 PID 或客户端路径识别程序。缺失、损坏或不匹配时拒绝连接，App 提供安装恢复入口。
+- `authorization` 参数保留在方法形状中但不再作为运行权限来源。安装、更新、卸载仍使用管理员授权。`AuthorizationVerifier` 与旧生命周期测试保留作兼容基础设施。
+- 打包 App 使用 Hardened Runtime，禁用 DYLD 环境注入和调试权限；临时签名依赖使用 `disable-library-validation` entitlement 配合**精确内嵌库 cdhash 加载约束**。不能删掉库约束或只核对主程序哈希，否则可替换依赖会破坏信任边界。
+- 约束已在本机验证：清单内库能加载，其他临时签名库被内核拒绝；XPC 探针允许指定 cdhash、拒绝相同签名标识但不同 cdhash。不同用户、跨 App 重启及超过 5 分钟的系统级验收仍须记录实测结果。
+
+下文保留初版设计与踩坑背景，涉及信任模型时以上述规则为准。
+
 ## 1. 进程与信任模型
 
 ```
@@ -77,7 +122,8 @@ gui/
 | 库 → helper：状态 | `tk_session_status_get` 拷贝快照 | 按需 |
 | 库 → helper：事件 | `tk_session_poll_events` 取环形队列 | 随状态查询搭车 |
 | 库 → helper：日志 | `tk_drain_logs` 取环形队列 | 每次 `drainFeed` |
-| helper → App | XPC，JSON 编码的 Codable | 500 ms |
+| helper → App：状态 | XPC，JSON 编码的 Codable | 主窗口或运行详情窗口可见时 1 秒 |
+| helper → App：日志与吞吐 | XPC，JSON 编码的 Codable | 仅运行详情窗口可见时 1 秒 |
 
 **全链路没有一个回调穿过语言边界。** 这是刻意的：底层的回调会从 libusb 事件
 线程与控制线程上来，跨语言要 marshal；更要命的是重入 —— 在回调里调停机会自等
@@ -231,8 +277,10 @@ helper 根本没有它 —— 那就又回到了「对不上还查不出来」�
   SwiftUI 生命周期不转发它），没有干净的委托口子可堵。对策在结果端：窗口每次
   出现时问 AppModel「这次展示登记过吗」（App 启动与「打开主窗口」按钮是仅有的
   两个登记点，3 秒时间窗），没登记过的当场 dismiss。见 `MainWindowRoot`。
-- **轮询是自适应的**：会话在跑 / 正在启停 / 窗口开着 → 500 ms；纯后台待机 →
-  2 秒。窗口重新打开时立刻补一次刷新，避免第一眼看到陈旧数据。
+- **轮询按窗口职责拆分**：主窗口可见时每秒刷新连接状态、设备和网络配置；运行详情
+  窗口可见时才读取日志并生成吞吐历史。两个窗口都关闭后停止 App 侧轮询；重新打开
+  详情窗口时清掉旧的吞吐历史，避免第一眼看到后台期间的假速率。网络会话继续由
+  helper 持有。
 
 ### 4.7b 界面语言
 
@@ -349,8 +397,8 @@ helper 缺失或版本不匹配时，界面给一个「安装 / 更新特权组�
 | App 内一键安装 / 更新 / 卸载特权组件 | `gui/Sources/TetherKitApp/HelperInstaller.swift` |
 | 检查更新（只查不换，每日自动 + 手动菜单） | `gui/Sources/TetherKitApp/UpdateChecker.swift` |
 | Finder 别名自动维护（首次启动建立，聚焦可搜可启动；brew postinstall 有沙箱建不了） | `gui/Sources/TetherKitApp/FinderAlias.swift` |
-| SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp` |
-| 菜单栏实时速率 + 后台运行（仅菜单栏模式） | `gui/Sources/TetherKitApp/Views/MenuBarPanel.swift` |
+| SwiftUI 界面（状态、设备、网络、吞吐、日志） | `gui/Sources/TetherKitApp`；吞吐与日志在 `Views/DetailsWindow.swift` 按需显示 |
+| 菜单栏入口 + 后台运行（仅菜单栏模式） | `gui/Sources/TetherKitApp/Views/MenuBarPanel.swift` |
 | 中英双语（运行期可切，界面 / 库日志 / helper 提示三处同步） | `gui/Sources/TetherKitIPC/Localization.swift`、`tk_set_language` |
 
 ### 未实现 / 已知限制
