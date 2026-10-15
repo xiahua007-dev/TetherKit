@@ -1,3 +1,58 @@
+## About this fork: changes and development approach
+
+[阅读本节中文版](README.zh-CN.md#本分支的修改与开发思路)
+
+This fork builds on [XiaoMiku01/TetherKit](https://github.com/XiaoMiku01/TetherKit). The original project provides the user-space RNDIS driver and USB-to-network architecture. My changes focus on making it practical for everyday use: **connect with fewer steps, make failures understandable, and keep resource use low when nothing needs doing.**
+
+### AI-assisted development
+
+The code changes in this fork were implemented by **OpenAI Codex (GPT-6)**, based on my requirements and feedback. I defined the goals, reviewed the behavior, and participated in real-device testing; the AI handled code edits, test additions, builds, and verification steps. This describes the changes in this fork, not the authorship of the upstream project.
+
+### What changed, and why
+
+| Area | Before these changes | This fork | Reason |
+|---|---|---|---|
+| Connection setup | Connecting and applying network settings were separate steps. | Connect once to apply DHCP or the last successful configuration automatically; show connection and address-configuration stages, failures, and retry actions. | A connection should lead to a usable network, with enough information to locate a failure. |
+| Authorization | Privileged operations relied on repeated administrator authorization. | An administrator registers the current user and exact App build once; normal connections use that persistent trust. Installation, updates, and removal still require administrator authorization. | Reduce repeated prompts while keeping privileged access tied to an approved user and build. |
+| Background lifecycle | The privileged helper stayed resident; UI refresh and an empty RX loop could cause unnecessary work. | Start the helper on connection and exit after disconnect or terminal failure. An active connection survives quitting the App. Stop main-page polling when its window is closed; keep a fixed menu-bar entry and move charts/logs into details. The empty RX loop sleeps after a short spin. | Unused features should not keep rendering, polling, or consuming a CPU core. |
+| Device selection | Device discovery and selection were restricted during a connection. | Refresh devices while connected, show refresh progress, and explicitly switch to another selected device; preserve device names across helper restarts. | Discovering or selecting another phone should not interrupt the current connection. |
+| Network diagnostics | Results required more space and inspection. | Show a compact summary: collapse all-pass results, expand failures automatically, and place failures first. | Make the outcome visible before the troubleshooting detail. |
+| Usage and advanced settings | No daily usage history per phone; MTU and MAC options stayed on the main page. | Show today's usage in each device row; open daily download/upload totals on click. Move MTU and MAC options into advanced settings. | Keep frequently useful information visible and rarely changed parameters out of the way. |
+
+### Current interface
+
+Captured from this fork running with a real phone connected (Chinese UI).
+
+**Main window:** today's usage appears in the device row; the serial number is hidden by default and can be revealed with the eye button. Advanced device parameters are accessed separately.
+
+![This fork: connected main window with daily usage](docs/assets/fork-main-zh.jpg)
+
+**Daily usage:** click today's total to see daily download, upload, and combined usage.
+
+![This fork: daily traffic history](docs/assets/fork-usage-zh.jpg)
+
+**Advanced device settings:** MTU and MAC options are kept off the main page. They are read-only while connected.
+
+![This fork: advanced device settings](docs/assets/fork-settings-zh.jpg)
+
+### The approach behind these changes
+
+1. **Start with everyday friction.** Heat, repeated authorization, manual IP setup, and unclear feedback drove the changes; the aim is a dependable daily tool.
+2. **Match work to actual use.** The UI refreshes when visible, the helper runs while needed, and traffic accounting reuses existing counters and the existing lifecycle check. No packet capture or additional per-packet accounting was added.
+3. **Keep routine actions simple and consequences explicit.** Successful defaults are remembered; device switching requires a deliberate action; technical controls and diagnostic details remain available on secondary screens.
+4. **Build on the existing architecture.** Keep the C++ user-space driver, C ABI, SwiftUI App, and privileged-helper separation. Add focused tests and verify the real connection lifecycle instead of replacing working foundations.
+
+### Scope and tradeoffs
+
+- Daily usage covers **this Mac's traffic through TetherKit**, including local-network traffic, not all phone traffic or carrier-billed usage. Device identity uses a hash of USB VID/PID and serial number; devices without a serial number are not merged by model name. Tracking starts when this feature is enabled.
+- Usage is grouped by the Mac's local date and sampled about once a second. Changed totals are saved at most once a minute during normal operation, and flushed on disconnect, failure, date change, or graceful shutdown. Abrupt termination can lose about a minute of unsaved usage.
+- Lower CPU use has tradeoffs: the RX idle wait can add about 1 ms plus scheduling delay to the first packet. A short, light-load helper sample measured about 0.6% of one CPU core, against an earlier short baseline of about 0.5%; this is not a controlled throughput comparison or a promise of zero overhead.
+- Verification for these changes: **53 Swift tests and 23 CTest entries passed**, plus real-phone checks for automatic DHCP, refresh, reconnect, helper exit, and usage persistence. Two-phone switching, static DNS behavior, and full-load throughput still need further hardware verification. The upstream benchmark results below are historical results, not a new benchmark of this fork.
+
+**Installation note:** the Homebrew commands and upstream links retained below refer to the original project's distribution. They do not install this fork's changes. To use this fork, build this checkout with its GUI build script; see [the build instructions](#building-from-source).
+
+---
+
 <p align="center">
   <img src="docs/assets/icon.png" width="128" alt="TetherKit icon">
 </p>
@@ -14,7 +69,9 @@ see and use — with **no kernel extension, no DriverKit, no SIP changes and no 
 account**. Works the same on Apple Silicon and Intel. Ships with a GUI — pick a device,
 connect, configure IP in three clicks — plus a command-line tool, `tetherkit-cli`.
 
-![TetherKit main window](docs/assets/screenshot-main-en.jpg)
+*Upstream interface before this fork; see the current screenshots above.*
+
+![Upstream main window before this fork](docs/assets/screenshot-main-en.jpg)
 
 - **USB side**: asynchronous bulk transfers via [libusb](https://libusb.info/), with a complete
   host-side RNDIS state machine.

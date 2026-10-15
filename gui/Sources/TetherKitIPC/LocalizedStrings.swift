@@ -22,6 +22,10 @@ public enum L10nKey: String, CaseIterable, Sendable {
 
     // MARK: - 通用
 
+    case deviceSerialValue
+    case deviceSerialHidden
+    case showDeviceSerial
+    case hideDeviceSerial
     case deviceSettings
     case deviceSettingsScope
     case todayUsage
@@ -345,6 +349,10 @@ extension L10nKey {
         // MARK: 通用
 
         case .deviceSettingsScope: return ("用于下一次连接；连接期间不可修改。通常保持默认值即可。", "Applies to the next connection; unavailable while connected. Defaults usually work best.")
+        case .deviceSerialValue: return ("SN %@", "SN %@")
+        case .deviceSerialHidden: return ("SN ••••••••", "SN ••••••••")
+        case .showDeviceSerial: return ("显示设备序列号", "Show device serial number")
+        case .hideDeviceSerial: return ("隐藏设备序列号", "Hide device serial number")
         case .deviceSettings: return ("设备高级设置", "Advanced device settings")
         case .todayUsage: return ("今日 %@", "Today %@")
         case .usageHistory: return ("每日流量", "Daily usage")

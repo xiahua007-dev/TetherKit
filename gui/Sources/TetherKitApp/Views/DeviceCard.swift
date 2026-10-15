@@ -150,6 +150,7 @@ private struct DeviceRow: View {
     let isLocked: Bool
     let isConnected: Bool
     let onSelect: () -> Void
+    @State private var isSerialVisible = false
 
     var body: some View {
         HStack(spacing: Design.Spacing.small) {
@@ -165,10 +166,6 @@ private struct DeviceRow: View {
                         HStack(spacing: Design.Spacing.tight) {
                             Text(device.summary)
                                 .font(.system(.caption, design: .monospaced))
-                            if !device.serial.isEmpty {
-                                Text("SN \(device.serial)")
-                                    .font(.system(.caption, design: .monospaced))
-                            }
                         }
                         .foregroundStyle(.secondary)
                     }
@@ -178,6 +175,22 @@ private struct DeviceRow: View {
             }
             .buttonStyle(.plain)
             .disabled(isLocked)
+
+            if !device.serial.isEmpty {
+                HStack(spacing: Design.Spacing.tight) {
+                    Text(isSerialVisible ? L(.deviceSerialValue, device.serial) : L(.deviceSerialHidden))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Button {
+                        isSerialVisible.toggle()
+                    } label: {
+                        Image(systemName: isSerialVisible ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(L(isSerialVisible ? .hideDeviceSerial : .showDeviceSerial))
+                    .help(L(isSerialVisible ? .hideDeviceSerial : .showDeviceSerial))
+                }
+            }
 
             Button(action: onUsage) {
                 Text(TrafficUsage.key(for: device) == nil ? L(.usageUntracked)
@@ -207,5 +220,7 @@ private struct DeviceRow: View {
                     .strokeBorder(isSelected ? Color.accentColor.opacity(0.4) : .clear,
                                   lineWidth: 1))
             .contentShape(Rectangle())
+            .onDisappear { isSerialVisible = false }
+            .onChange(of: device.serial) { isSerialVisible = false }
     }
 }
