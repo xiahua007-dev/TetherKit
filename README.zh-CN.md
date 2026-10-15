@@ -33,6 +33,25 @@
 
 ![本分支：设备高级设置](docs/assets/fork-settings-zh.jpg)
 
+### 发布可下载的 Release
+
+`Release` 工作流会检出标签对应的源码，构建并测试，打包 App 和命令行工具，再将两个附件及 `SHA256SUMS.txt` 上传到本仓库的 GitHub Releases，不会同步原作者的 Homebrew tap。
+
+1. 如果 GitHub 提示当前 fork 未启用工作流，先在 Actions 页面启用。
+2. 将 `CMakeLists.txt` 的 `VERSION` 改成新版本，提交发布修改并推送到 `main`。新标签对应的源码必须包含这次工作流修改。
+3. 创建并推送相同版本的标签。例如，**先将 VERSION 改为 0.2.0**，然后执行：
+
+   ```bash
+   git tag -a v0.2.0 -m "TetherKit 0.2.0"
+   git push origin v0.2.0
+   ```
+
+4. 在 `Actions → Release` 查看结果。成功后，到 `Releases → Assets` 下载 App zip；GitHub 自动生成的“Source code”附件只有源码，不是 App。
+
+也可在 `Actions → Release → Run workflow` 填写**已存在且版本一致的标签**手动运行，适合标签触发没有执行的情况；已有 Release 不会被覆盖。手动按钮需要本工作流先推送到默认分支才会出现。
+
+当前附件支持 **macOS 26+、Apple Silicon**。App 内嵌 libusb，命令行附件仍需 Homebrew libusb。App 使用临时签名，未经 Apple 公证。只有实际云端构建成功后才能确认本次发布可下载，本地检查通过不代表 GitHub Actions 已运行成功。
+
 ### 我的开发思路
 
 1. **先解决真实使用中的麻烦。** 从发热、重复授权、手动配 IP、操作反馈不清楚这些问题入手，把它完善成适合每天使用的工具。
@@ -47,7 +66,7 @@
 - 降低 CPU 占用也有取舍：RX 空闲等待可能给首包增加约 1 ms 加调度延迟。一次轻负载短时采样中，helper 约占单核 CPU 的 0.6%，此前短时基线约 0.5%；这不是严格的吞吐对照，也不承诺零开销。
 - 本轮 **53 项 Swift 测试、23 项 CTest 通过**，并用真实手机验证自动 DHCP、刷新、重连、组件退出和用量保存。双真实手机切换、静态 DNS 及满负载吞吐仍需进一步真机验证。下文原项目的性能数据属于历史结果，不能当作本分支的新压测结论。
 
-**安装说明：**下文保留的 Homebrew 命令及上游链接对应原项目发行渠道，不会安装本分支的修改。要使用本分支，请从当前仓库源码通过 GUI 构建脚本打包，具体见下文构建说明。
+**安装说明：**下文保留的 Homebrew 命令及上游链接对应原项目发行渠道，不会安装本分支的修改。要使用本分支，可在发布后从[本仓库 Releases](https://github.com/xiahua007-dev/TetherKit/releases)下载预编译 App（macOS 26+、Apple Silicon），或从当前仓库源码通过 GUI 构建脚本打包，具体见下文构建说明。
 
 ---
 

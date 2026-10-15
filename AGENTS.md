@@ -656,3 +656,9 @@ ctest --test-dir build -R common.i18n --output-on-failure
 ### 序列号隐私与分支说明更新
 
 设备行序列号默认隐藏，使用独立眼睛按钮显示/隐藏；视图离场或设备序列号变化时恢复隐藏，不保存显示偏好。已真机核对隐藏状态的辅助功能树不含明文SN，显示/隐藏按钮正常。README中英文新增分支修改动机、上游对比、AI开发说明与三张新版实机截图，主截图隐藏序列号。Swift53项通过，Release启用并恢复连接。用户已要求提交并推送本轮修改。
+
+### fork Release 流程调整（未提交）
+
+Release改为标签触发或手动输入已有标签，核对标签格式、实际提交与CMake版本，运行C++/Swift测试及签名检查后上传App zip、CLI tar.gz和SHA256SUMS.txt。移除上游tap自动调用，update-tap另加上游仓库限制；更新说明不再引导安装原作者版本。现有macos-26 runner的附件明确标注macOS26+/arm64，构建脚本通过TETHERKIT_APP_MIN_MACOS在签名前写入App实际最低版本，普通本地打包默认14.0不变。App检查更新源改为xiahua007-dev/TetherKit。actionlint1.7.12、shell语法、隔离标签/版本拒绝及plist写入验证通过；Swift53项通过。尚未推送本轮配置、创建标签或运行云端发布，当前VERSION仍0.1.5；建议首个fork版本选新版本如0.2.0，需同时更新VERSION及标签。未重新替换正在运行的App。
+
+本轮Release配置已获用户授权提交推送；仅推main，不创建版本标签或触发Release。验证结果与尚未运行云端发布的限制保持不变。

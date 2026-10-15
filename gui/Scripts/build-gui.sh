@@ -94,6 +94,11 @@ mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Frameworks" \
 cp "${SWIFT_BIN_DIR}/TetherKitApp" "${APP_DIR}/Contents/MacOS/TetherKit"
 sed "s/__TETHERKIT_VERSION__/${VERSION}/g" \
   "${GUI_DIR}/Resources/App-Info.plist" > "${APP_DIR}/Contents/Info.plist"
+# Release 附件的依赖可能要求更高系统版本；必须在签名前写入实际下限。
+if [[ -n "${TETHERKIT_APP_MIN_MACOS:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion ${TETHERKIT_APP_MIN_MACOS}" \
+    "${APP_DIR}/Contents/Info.plist"
+fi
 cp "${GUI_DIR}/Resources/AppIcon.icns" "${APP_DIR}/Contents/Resources/"
 
 # ★ 必须用 cp -a，不能用 install ★

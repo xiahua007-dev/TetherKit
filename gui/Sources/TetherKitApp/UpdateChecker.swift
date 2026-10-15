@@ -76,7 +76,7 @@ enum UpdateChecker {
     // MARK: - 实现
 
     private static let endpoint =
-        URL(string: "https://api.github.com/repos/XiaoMiku01/TetherKit/releases/latest")!
+        URL(string: "https://api.github.com/repos/xiahua007-dev/TetherKit/releases/latest")!
 
     private struct Payload: Decodable {
         let tagName: String

@@ -334,3 +334,8 @@ CPU记录在work/usage-cpu-before.json、usage-cpu-after.json、usage-cpu-steady
 ## 序列号默认隐藏与截图更新（未提交）
 
 DeviceRow将SN默认替换为固定长度圆点，独立眼睛按钮可切换显示/隐藏，退出视图或序列号变化时恢复隐藏，不持久化显示偏好。隐藏状态下辅助功能树中不包含真实序列号，设备选择按钮与眼睛按钮分开，避免嵌套按钮。只改展示，不改变设备身份或每日记账。53项Swift通过，Release打包并启用；组件bootstrap首次5，UI重试成功。真机验证默认隐藏、点击显示、再点击隐藏、连接自动DHCP至10.81.9.48。README三张fork截图均已重新保存，主图不含明文SN；当前保持连接且SN隐藏。用户要求继续不提交/推送。
+
+## fork自动Release配置（未提交）
+
+已按用户要求修改.github/workflows/release.yml，推v*或手动输入已有标签发版，标签与VERSION校验、防重复并发、C++/Swift测试、签名验证及附件校验和。发布目标保留macos-26 arm64，如实将附件标为macos26-arm64并在签名前通过TETHERKIT_APP_MIN_MACOS写入26.0；源码GUI默认14.0未改。移除自动写上游tap，update-tap手动入口在fork跳过。GUI更新API改为用户fork。README中英文新增发版步骤及下载环境说明。
+验证：actionlint1.7.12检查两个工作流通过；bash -n检查构建脚本和各run段通过；隔离git仓库验证匹配版本接受、版本不符和非法标签拒绝，临时plist验证最低系统版本写入成功；Swift53项通过。没有实际运行GitHub Actions，不能声称已有Release附件。当前源版本0.1.5未改、未创建标签、未提交推送。首发应决定一个新版本（建议0.2.0）并更新CMake版本后推新标签，标签源码必须包含本轮工作流。当前运行的已信任App未重打包，因此在安装下一构建前更新检查仍用旧二进制行为。

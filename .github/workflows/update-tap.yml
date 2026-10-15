@@ -28,6 +28,8 @@ on:
 
 jobs:
   update:
+    # 上游专用：fork 不尝试写入原作者的 tap。
+    if: github.repository == 'XiaoMiku01/TetherKit'
     name: 同步 formula 到 ${{ inputs.tag }}
     runs-on: macos-26
 

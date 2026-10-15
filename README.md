@@ -35,6 +35,25 @@ Captured from this fork running with a real phone connected (Chinese UI).
 
 ![This fork: advanced device settings](docs/assets/fork-settings-zh.jpg)
 
+### Publishing downloadable releases
+
+The `Release` workflow builds and tests the tagged source, packages the App and CLI, and uploads both files plus `SHA256SUMS.txt` to this repository's GitHub Releases. It does not update the upstream Homebrew tap.
+
+1. Enable Actions in your fork if GitHub displays a disabled-workflow notice.
+2. Set `VERSION` in `CMakeLists.txt` to a new version, commit the release changes, and push them to `main`. Use a fresh tag whose source includes this workflow.
+3. Create and push the matching tag; for example, **after setting VERSION to 0.2.0**:
+
+   ```bash
+   git tag -a v0.2.0 -m "TetherKit 0.2.0"
+   git push origin v0.2.0
+   ```
+
+4. Watch `Actions → Release`. After it succeeds, download the App zip from `Releases → Assets`. The automatically generated “Source code” archives contain source, not the App.
+
+You can also use `Actions → Release → Run workflow` and enter an **existing matching tag**. This is useful if tag-triggered publishing did not run; a Release that already exists will not be overwritten. The manual button appears after this workflow is pushed to the default branch.
+
+Current release attachments target **macOS 26+ on Apple Silicon**. The App bundles libusb; the CLI attachment needs Homebrew libusb. The App is ad-hoc signed and not notarized. A successful local test does not establish that the hosted release build has succeeded; inspect the actual Actions run before announcing a release.
+
 ### The approach behind these changes
 
 1. **Start with everyday friction.** Heat, repeated authorization, manual IP setup, and unclear feedback drove the changes; the aim is a dependable daily tool.
@@ -49,7 +68,7 @@ Captured from this fork running with a real phone connected (Chinese UI).
 - Lower CPU use has tradeoffs: the RX idle wait can add about 1 ms plus scheduling delay to the first packet. A short, light-load helper sample measured about 0.6% of one CPU core, against an earlier short baseline of about 0.5%; this is not a controlled throughput comparison or a promise of zero overhead.
 - Verification for these changes: **53 Swift tests and 23 CTest entries passed**, plus real-phone checks for automatic DHCP, refresh, reconnect, helper exit, and usage persistence. Two-phone switching, static DNS behavior, and full-load throughput still need further hardware verification. The upstream benchmark results below are historical results, not a new benchmark of this fork.
 
-**Installation note:** the Homebrew commands and upstream links retained below refer to the original project's distribution. They do not install this fork's changes. To use this fork, build this checkout with its GUI build script; see [the build instructions](#building-from-source).
+**Installation note:** the Homebrew commands and upstream links retained below refer to the original project's distribution. They do not install this fork's changes. Download this fork's prebuilt App from [Releases](https://github.com/xiahua007-dev/TetherKit/releases) when available (macOS 26+, Apple Silicon), or build this checkout with its GUI build script; see [the build instructions](#building-from-source).
 
 ---
 
